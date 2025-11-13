@@ -1,0 +1,589 @@
+"""
+历史数据记录器
+
+职责：
+- 时间窗口采样
+- 异步批量写入CSV文件
+- 完全异步化，不阻塞核心流程
+
+性能保证：
+- 内存写入：< 0.001ms
+- 采样操作：< 0.1ms（每1分钟一次）
+- 队列操作：< 0.001ms
+- 总体影响：< 0.01ms
+"""
+
+import asyncio
+import time
+from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+from pathlib import Path
+from collections import defaultdict
+
+try:
+    import aiofiles
+except ImportError:
+    aiofiles = None
+    print("⚠️  aiofiles未安装，历史记录功能将无法使用。请运行: pip install aiofiles")
+
+try:
+    import aiosqlite
+except ImportError:
+    aiosqlite = None
+    print("⚠️  aiosqlite未安装，SQLite功能将无法使用。请运行: pip install aiosqlite")
+
+
+class SpreadHistoryRecorder:
+    """历史记录器（完全异步，不阻塞核心流程）
+    
+    采用时间窗口采样策略：每1分钟采样一次数据点
+    """
+    
+    def __init__(
+        self, 
+        data_dir: str = "data/spread_history",
+        sample_interval_seconds: int = 60,
+        sample_strategy: str = "max",
+        batch_size: int = 10,
+        batch_timeout: float = 60.0,
+        queue_maxsize: int = 500,
+        compress_after_days: int = 10,
+        archive_after_days: int = 30,
+        cleanup_interval_hours: int = 24
+    ):
+        """
+        初始化历史记录器
+        
+        Args:
+            data_dir: 数据存储目录
+            sample_interval_seconds: 采样间隔（秒），默认1分钟
+            sample_strategy: 采样策略：max(最大值), mean(平均值), latest(最新值)
+            batch_size: 批量写入大小
+            batch_timeout: 批量写入超时（秒）
+            queue_maxsize: 写入队列最大大小
+            compress_after_days: 压缩天数（10天后压缩）
+            archive_after_days: 归档天数（30天后归档）
+            cleanup_interval_hours: 清理任务执行间隔（小时）
+        """
+        if aiofiles is None:
+            raise ImportError("aiofiles未安装，无法使用历史记录功能")
+        
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        (self.data_dir / "raw").mkdir(parents=True, exist_ok=True)
+        (self.data_dir / "archive").mkdir(parents=True, exist_ok=True)
+        
+        # SQLite数据库路径
+        self.db_path = self.data_dir / "spread_history.db"
+        self.sqlite_enabled = aiosqlite is not None
+        
+        # 压缩和归档配置
+        self.compress_after_days = compress_after_days
+        self.archive_after_days = archive_after_days
+        self.cleanup_interval_hours = cleanup_interval_hours
+        
+        # 时间窗口采样配置
+        self.sample_interval_seconds = sample_interval_seconds
+        self.sample_strategy = sample_strategy
+        
+        # 时间窗口数据缓存（用于采样，限制大小）
+        self.window_data: Dict[str, List[dict]] = defaultdict(list)
+        self.window_data_maxsize = 100  # 每个代币最多保留100条
+        self.last_sample_time = time.time()
+        
+        # 写入队列（异步）
+        self.write_queue = asyncio.Queue(maxsize=queue_maxsize)
+        
+        # 当前日期（用于文件轮转）
+        self.current_date = datetime.now().date()
+        self.current_file: Optional[Path] = None
+        
+        # 批量写入配置
+        self.batch_size = batch_size
+        self.batch_timeout = batch_timeout
+        
+        # 写入任务
+        self.write_task: Optional[asyncio.Task] = None
+        self.sample_task: Optional[asyncio.Task] = None
+        self.cleanup_task: Optional[asyncio.Task] = None
+        
+        # 运行状态
+        self.running = False
+        
+        # 统计信息
+        self.stats = {
+            'records_received': 0,
+            'samples_taken': 0,
+            'batches_written': 0,
+            'sqlite_batches_written': 0,
+            'queue_drops': 0,
+            'files_compressed': 0,
+            'files_archived': 0,
+        }
+    
+    async def start(self):
+        """启动异步写入任务和采样任务"""
+        if self.running:
+            return
+        
+        # 初始化SQLite数据库（如果启用）
+        if self.sqlite_enabled:
+            await self._init_sqlite_database()
+        
+        self.running = True
+        self.write_task = asyncio.create_task(self._async_write_loop())
+        self.sample_task = asyncio.create_task(self._time_window_sampler())
+        self.cleanup_task = asyncio.create_task(self._cleanup_loop())
+        
+        sqlite_status = "（SQLite已启用）" if self.sqlite_enabled else "（SQLite未启用）"
+        print(f"✅ 历史记录器已启动 {sqlite_status}")
+    
+    async def stop(self):
+        """停止历史记录器"""
+        self.running = False
+        
+        if self.sample_task:
+            self.sample_task.cancel()
+            try:
+                await self.sample_task
+            except asyncio.CancelledError:
+                pass
+        
+        if self.write_task:
+            self.write_task.cancel()
+            try:
+                await self.write_task
+            except asyncio.CancelledError:
+                pass
+        
+        if self.cleanup_task:
+            self.cleanup_task.cancel()
+            try:
+                await self.cleanup_task
+            except asyncio.CancelledError:
+                pass
+        
+        # 写入剩余数据
+        await self._flush_remaining_data()
+        
+        print("🛑 历史记录器已停止")
+    
+    async def record_spread(self, data: dict):
+        """记录价差（非阻塞，只写入时间窗口缓存）
+        
+        性能保证：< 0.001ms，不阻塞
+        
+        Args:
+            data: 套利机会数据，包含：
+                - symbol: 代币符号
+                - exchange_buy: 买入交易所
+                - exchange_sell: 卖出交易所
+                - price_buy: 买入价格
+                - price_sell: 卖出价格
+                - spread_pct: 价差百分比
+                - funding_rate_diff_annual: 年化资金费率差（可选）
+                - size_buy: 买入数量（可选）
+                - size_sell: 卖出数量（可选）
+        """
+        if not self.running:
+            return
+        
+        symbol = data.get('symbol')
+        if not symbol:
+            return
+        
+        # 添加到时间窗口缓存（不阻塞）
+        self.window_data[symbol].append({
+            **data,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+        # 限制缓存大小（避免内存积累）
+        if len(self.window_data[symbol]) > self.window_data_maxsize:
+            self.window_data[symbol] = self.window_data[symbol][-self.window_data_maxsize:]
+        
+        self.stats['records_received'] += 1
+    
+    async def _time_window_sampler(self):
+        """时间窗口采样器（每1分钟采样一次，非阻塞）"""
+        while self.running:
+            try:
+                await asyncio.sleep(self.sample_interval_seconds)
+                
+                current_time = time.time()
+                if current_time - self.last_sample_time >= self.sample_interval_seconds:
+                    # 采样当前时间窗口的数据（< 0.1ms）
+                    sampled_data = self._sample_window_data()
+                    
+                    if sampled_data:
+                        self.stats['samples_taken'] += len(sampled_data)
+                        
+                        # 非阻塞放入写入队列
+                        try:
+                            self.write_queue.put_nowait(sampled_data)
+                        except asyncio.QueueFull:
+                            # 队列满时丢弃（不影响核心流程）
+                            self.stats['queue_drops'] += 1
+                    
+                    # 清空时间窗口缓存
+                    self.window_data.clear()
+                    self.last_sample_time = current_time
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                # 错误隔离：不影响核心流程
+                print(f"⚠️  历史记录采样错误（已隔离）: {e}")
+    
+    def _sample_window_data(self) -> List[dict]:
+        """采样时间窗口数据（< 0.1ms）"""
+        sampled = []
+        
+        for symbol, data_list in self.window_data.items():
+            if not data_list:
+                continue
+            
+            if self.sample_strategy == "max":
+                # 选择价差最大的数据点
+                best = max(data_list, key=lambda x: x.get('spread_pct', 0))
+                sampled.append(best)
+            elif self.sample_strategy == "mean":
+                # 计算平均值
+                if len(data_list) > 0:
+                    avg_data = {
+                        'symbol': symbol,
+                        'timestamp': datetime.now().isoformat(),
+                        'exchange_buy': data_list[0].get('exchange_buy', ''),
+                        'exchange_sell': data_list[0].get('exchange_sell', ''),
+                        'price_buy': sum(d.get('price_buy', 0) for d in data_list) / len(data_list),
+                        'price_sell': sum(d.get('price_sell', 0) for d in data_list) / len(data_list),
+                        'spread_pct': sum(d.get('spread_pct', 0) for d in data_list) / len(data_list),
+                        'funding_rate_diff_annual': sum(d.get('funding_rate_diff_annual', 0) for d in data_list) / len(data_list) if data_list[0].get('funding_rate_diff_annual') is not None else None,
+                        'size_buy': sum(d.get('size_buy', 0) for d in data_list) / len(data_list),
+                        'size_sell': sum(d.get('size_sell', 0) for d in data_list) / len(data_list),
+                    }
+                    sampled.append(avg_data)
+            elif self.sample_strategy == "latest":
+                # 选择最新的数据点
+                sampled.append(data_list[-1])
+        
+        return sampled
+    
+    async def _init_sqlite_database(self):
+        """初始化SQLite数据库和表结构"""
+        if not self.sqlite_enabled:
+            return
+        
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 创建表
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS spread_history_sampled (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME NOT NULL,
+                        symbol TEXT NOT NULL,
+                        exchange_buy TEXT NOT NULL,
+                        exchange_sell TEXT NOT NULL,
+                        price_buy REAL NOT NULL,
+                        price_sell REAL NOT NULL,
+                        spread_pct REAL NOT NULL,
+                        funding_rate_diff_annual REAL,
+                        size_buy REAL NOT NULL,
+                        size_sell REAL NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # 创建索引（如果不存在）
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_sampled_timestamp 
+                    ON spread_history_sampled(timestamp)
+                """)
+                
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_sampled_symbol 
+                    ON spread_history_sampled(symbol)
+                """)
+                
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_sampled_symbol_timestamp 
+                    ON spread_history_sampled(symbol, timestamp)
+                """)
+                
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_sampled_spread_pct 
+                    ON spread_history_sampled(spread_pct)
+                """)
+                
+                await db.commit()
+                
+        except Exception as e:
+            print(f"⚠️  SQLite数据库初始化失败（已隔离）: {e}")
+            self.sqlite_enabled = False
+    
+    async def _async_write_loop(self):
+        """异步写入循环（独立任务，不阻塞主流程）"""
+        batch = []
+        last_write_time = time.time()
+        
+        while self.running:
+            try:
+                # 等待数据或超时
+                timeout = self.batch_timeout - (time.time() - last_write_time)
+                if timeout <= 0:
+                    timeout = 0.1
+                
+                data = await asyncio.wait_for(
+                    self.write_queue.get(),
+                    timeout=timeout
+                )
+                
+                # data可能是单个dict或list
+                if isinstance(data, list):
+                    batch.extend(data)
+                else:
+                    batch.append(data)
+                
+                # 批量写入（积累batch_size条或batch_timeout秒）
+                if len(batch) >= self.batch_size:
+                    await self._write_batch(batch)
+                    batch = []
+                    last_write_time = time.time()
+                    
+            except asyncio.TimeoutError:
+                # 超时，写入当前批次
+                if batch:
+                    await self._write_batch(batch)
+                    batch = []
+                    last_write_time = time.time()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                # 错误隔离：不影响核心流程
+                print(f"⚠️  历史记录写入错误（已隔离）: {e}")
+    
+    async def _write_batch(self, batch: List[dict]):
+        """批量写入CSV和SQLite（异步IO，不阻塞）"""
+        if not batch:
+            return
+        
+        # 并行写入CSV和SQLite
+        tasks = [self._write_batch_to_csv(batch)]
+        if self.sqlite_enabled:
+            tasks.append(self._write_batch_to_sqlite(batch))
+        
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.stats['batches_written'] += 1
+    
+    async def _write_batch_to_csv(self, batch: List[dict]):
+        """批量写入CSV文件（异步IO）"""
+        if not batch:
+            return
+        
+        try:
+            # 检查日期变化（文件轮转）
+            today = datetime.now().date()
+            if today != self.current_date:
+                self.current_date = today
+                self.current_file = None
+            
+            # 获取今天的文件路径
+            if self.current_file is None:
+                csv_file = self.data_dir / "raw" / f"{today.strftime('%Y-%m-%d')}.csv"
+                self.current_file = csv_file
+                
+                # 如果是新文件，写入表头
+                if not csv_file.exists():
+                    header = "timestamp,symbol,exchange_buy,exchange_sell,price_buy,price_sell,spread_pct,funding_rate_diff_annual,size_buy,size_sell\n"
+                    async with aiofiles.open(csv_file, 'a') as f:
+                        await f.write(header)
+            
+            # 批量写入数据
+            lines = []
+            for data in batch:
+                line = (
+                    f"{data.get('timestamp', '')},"
+                    f"{data.get('symbol', '')},"
+                    f"{data.get('exchange_buy', '')},"
+                    f"{data.get('exchange_sell', '')},"
+                    f"{data.get('price_buy', 0):.8f},"
+                    f"{data.get('price_sell', 0):.8f},"
+                    f"{data.get('spread_pct', 0):.6f},"
+                    f"{data.get('funding_rate_diff_annual', 0) if data.get('funding_rate_diff_annual') is not None else 0:.2f},"
+                    f"{data.get('size_buy', 0):.8f},"
+                    f"{data.get('size_sell', 0):.8f}\n"
+                )
+                lines.append(line)
+            
+            # 异步写入文件
+            async with aiofiles.open(self.current_file, 'a') as f:
+                await f.writelines(lines)
+            
+        except Exception as e:
+            # 错误隔离：不影响核心流程
+            print(f"⚠️  历史记录CSV写入错误（已隔离）: {e}")
+    
+    async def _write_batch_to_sqlite(self, batch: List[dict]):
+        """批量写入SQLite数据库（异步）"""
+        if not batch or not self.sqlite_enabled:
+            return
+        
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 使用executemany批量插入，提高性能
+                await db.executemany("""
+                    INSERT INTO spread_history_sampled 
+                    (timestamp, symbol, exchange_buy, exchange_sell, 
+                     price_buy, price_sell, spread_pct, funding_rate_diff_annual, 
+                     size_buy, size_sell)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, [
+                    (
+                        data.get('timestamp', ''),
+                        data.get('symbol', ''),
+                        data.get('exchange_buy', ''),
+                        data.get('exchange_sell', ''),
+                        data.get('price_buy', 0),
+                        data.get('price_sell', 0),
+                        data.get('spread_pct', 0),
+                        data.get('funding_rate_diff_annual') if data.get('funding_rate_diff_annual') is not None else None,
+                        data.get('size_buy', 0),
+                        data.get('size_sell', 0),
+                    )
+                    for data in batch
+                ])
+                await db.commit()
+                self.stats['sqlite_batches_written'] += 1
+                
+        except Exception as e:
+            # 错误隔离：不影响核心流程
+            print(f"⚠️  历史记录SQLite写入错误（已隔离）: {e}")
+    
+    async def _flush_remaining_data(self):
+        """刷新剩余数据"""
+        # 采样剩余数据
+        sampled_data = self._sample_window_data()
+        if sampled_data:
+            try:
+                self.write_queue.put_nowait(sampled_data)
+            except asyncio.QueueFull:
+                pass
+        
+        # 写入队列中剩余的数据
+        batch = []
+        while not self.write_queue.empty():
+            try:
+                data = self.write_queue.get_nowait()
+                if isinstance(data, list):
+                    batch.extend(data)
+                else:
+                    batch.append(data)
+            except asyncio.QueueEmpty:
+                break
+        
+        if batch:
+            await self._write_batch(batch)
+    
+    async def _cleanup_loop(self):
+        """清理循环（定期压缩和归档旧文件）"""
+        # 启动时等待一段时间再执行第一次清理
+        await asyncio.sleep(3600)  # 等待1小时
+        
+        while self.running:
+            try:
+                await self._archive_old_files()
+                # 等待清理间隔
+                await asyncio.sleep(self.cleanup_interval_hours * 3600)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                # 错误隔离：不影响核心流程
+                print(f"⚠️  清理任务错误（已隔离）: {e}")
+                await asyncio.sleep(3600)  # 出错后等待1小时再重试
+    
+    async def _archive_old_files(self):
+        """归档旧文件（压缩和归档）"""
+        import gzip
+        import shutil
+        
+        raw_dir = self.data_dir / "raw"
+        archive_dir = self.data_dir / "archive"
+        
+        if not raw_dir.exists():
+            return
+        
+        compress_cutoff = datetime.now().date() - timedelta(days=self.compress_after_days)
+        archive_cutoff = datetime.now().date() - timedelta(days=self.archive_after_days)
+        
+        compressed_count = 0
+        archived_count = 0
+        
+        for csv_file in raw_dir.glob("*.csv"):
+            try:
+                # 提取日期（文件名格式：YYYY-MM-DD.csv）
+                file_date_str = csv_file.stem
+                file_date = datetime.strptime(file_date_str, "%Y-%m-%d").date()
+                
+                if file_date < archive_cutoff:
+                    # 归档：移动到归档目录并压缩
+                    gz_file = archive_dir / f"{file_date_str}.csv.gz"
+                    
+                    # 异步压缩（使用线程池避免阻塞）
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None,
+                        self._compress_file,
+                        csv_file,
+                        gz_file
+                    )
+                    
+                    csv_file.unlink()
+                    archived_count += 1
+                    
+                elif file_date < compress_cutoff:
+                    # 压缩：原地压缩
+                    gz_file = csv_file.with_suffix('.csv.gz')
+                    
+                    # 异步压缩
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None,
+                        self._compress_file,
+                        csv_file,
+                        gz_file
+                    )
+                    
+                    csv_file.unlink()
+                    compressed_count += 1
+                    
+            except ValueError:
+                # 文件名格式不正确，跳过
+                continue
+            except Exception as e:
+                # 错误隔离：不影响核心流程
+                print(f"⚠️  文件处理错误（已隔离）: {csv_file.name}, {e}")
+                continue
+        
+        if compressed_count > 0 or archived_count > 0:
+            self.stats['files_compressed'] += compressed_count
+            self.stats['files_archived'] += archived_count
+            print(f"📦 清理完成: 压缩 {compressed_count} 个文件，归档 {archived_count} 个文件")
+    
+    @staticmethod
+    def _compress_file(source_file: Path, target_file: Path):
+        """压缩文件（同步操作，在线程池中执行）"""
+        import gzip
+        import shutil
+        
+        with open(source_file, 'rb') as f_in:
+            with gzip.open(target_file, 'wb') as f_out:
+                shutil.copyfileobj(f_in, f_out)
+    
+    def get_stats(self) -> dict:
+        """获取统计信息"""
+        return {
+            **self.stats,
+            'queue_size': self.write_queue.qsize(),
+            'window_data_count': sum(len(v) for v in self.window_data.values()),
+        }
+

@@ -1,0 +1,6 @@
+2025-11-13 15:41:29,354 - core.adapters.exchanges.adapters.lighter_rest - INFO - __init__:147 - ✅ Lighter WebSocket模块已初始化
+2025-11-13 15:41:29,355 - core.adapters.exchanges.adapters.lighter_rest - INFO - __init__:152 - Lighter REST客户端初始化完成
+2025-11-13 15:41:32,252 - core.adapters.exchanges.adapters.lighter_rest - INFO - initialize:193 - Lighter REST客户端连接成功
+2025-11-13 15:41:33,136 - core.adapters.exchanges.adapters.lighter_rest - INFO - _load_markets:282 - 加载了 105 个市场
+2025-11-13 15:41:33,137 - core.adapters.exchanges.adapters.lighter_rest - INFO - initialize:201 - 🔗 准备连接WebSocket - markets数量: 105, _markets_cache数量: 105
+2025-11-13 15:41:33,137 - core.adapters.exchanges.adapters.lighter_rest - INFO - initialize:210 - ✅ Lighter WebSocket已连接

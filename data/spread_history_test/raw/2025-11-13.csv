@@ -1,0 +1,2 @@
+timestamp,symbol,exchange_buy,exchange_sell,price_buy,price_sell,spread_pct,funding_rate_diff_annual,size_buy,size_sell
+2025-11-13T07:29:14.731424,PAXG-USDC-PERP,edgex,lighter,4174.60000000,4179.69000000,0.122000,56.50,0.06900000,0.84730000
