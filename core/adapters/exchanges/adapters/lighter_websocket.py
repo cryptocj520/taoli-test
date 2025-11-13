@@ -119,6 +119,7 @@ class LighterWebSocket(LighterBase):
 
         # 🔥 数据超时检测（参考 test_sol_orderbook.py）
         self._last_message_time: float = 0  # 最后接收消息的时间戳
+        self._connection_start_time: float = 0  # 🔥 连接建立时的时间戳（用于诊断）
         self._data_timeout_task: Optional[asyncio.Task] = None  # 数据超时检测任务
         self._data_timeout_seconds: float = 120.0  # 数据超时阈值（120秒，参考Lighter的120秒ping超时）
 
@@ -1638,12 +1639,19 @@ class LighterWebSocket(LighterBase):
                     logger.info("✅ WebSocket已连接")
                     self._direct_ws = ws
                     
-                    # 🚀 启动主动心跳任务（参考测试脚本的稳定连接方案）
-                    self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-                    logger.info("💓 主动心跳任务已启动 (每30秒主动发送pong)")
+                    # 🔥 记录连接建立时的时间戳（用于诊断）
+                    connection_start_time = time.time()
+                    self._connection_start_time = connection_start_time
+                    
+                    # 🔥 修改：移除主动心跳，Lighter只支持被动响应ping
+                    # Lighter协议要求：服务器发送ping → 客户端回复pong
+                    # 主动发送pong可能导致服务器断开连接
+                    # self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+                    # logger.info("💓 主动心跳任务已启动 (每30秒主动发送pong)")
+                    logger.info("💓 心跳机制：被动响应模式（收到ping后回复pong）")
                     
                     # 🔥 初始化最后消息时间（连接建立时）
-                    self._last_message_time = time.time()
+                    self._last_message_time = connection_start_time
                     
                     # 🚀 启动数据超时检测任务（参考 test_sol_orderbook.py）
                     self._data_timeout_task = asyncio.create_task(self._data_timeout_monitor())
@@ -1709,6 +1717,15 @@ class LighterWebSocket(LighterBase):
                             # 🔥 更新最后消息时间（任何消息都算，包括ping）
                             self._last_message_time = time.time()
                             
+                            # 🔥 诊断：记录所有消息类型（特别关注ping消息）
+                            try:
+                                data_preview = json.loads(message)
+                                msg_type_preview = data_preview.get("type", "")
+                                if msg_type_preview == "ping" or "ping" in str(data_preview).lower():
+                                    logger.info(f"🔍 [PING诊断] 收到消息: {message[:200]}")  # 只记录前200字符
+                            except:
+                                pass
+                            
                             data = json.loads(message)
                             await self._handle_direct_ws_message(data)
                         except json.JSONDecodeError as e:
@@ -1717,14 +1734,21 @@ class LighterWebSocket(LighterBase):
                             logger.error(f"❌ 处理消息失败: {e}", exc_info=True)
 
             except websockets.exceptions.ConnectionClosedError as e:
-                # 🚀 取消心跳任务和数据超时检测任务
-                if self._heartbeat_task and not self._heartbeat_task.done():
-                    self._heartbeat_task.cancel()
-                    try:
-                        await self._heartbeat_task
-                    except asyncio.CancelledError:
-                        pass
+                # 🔥 诊断：记录连接断开时的状态
+                current_time = time.time()
+                last_msg_age = current_time - self._last_message_time if self._last_message_time > 0 else 0
+                # 🔥 修复：使用记录的连接建立时间，而不是计算
+                connection_duration = current_time - self._connection_start_time if self._connection_start_time > 0 else 0
                 
+                logger.warning(
+                    f"🔍 [连接断开诊断] "
+                    f"连接建立时间: {self._connection_start_time:.1f}, "
+                    f"最后消息时间: {self._last_message_time:.1f}, "
+                    f"距离最后消息: {last_msg_age:.1f}秒, "
+                    f"连接持续时间: {connection_duration:.1f}秒"
+                )
+                
+                # 🚀 取消数据超时检测任务（已移除主动心跳任务）
                 if self._data_timeout_task and not self._data_timeout_task.done():
                     self._data_timeout_task.cancel()
                     try:
@@ -1732,21 +1756,41 @@ class LighterWebSocket(LighterBase):
                     except asyncio.CancelledError:
                         pass
                 
-                # WebSocket连接关闭
+                # 🔥 改进：使用指数退避策略，避免频繁重连
                 retry_count += 1
-                logger.warning(
-                    f"⚠️ WebSocket连接已关闭: {e}，5秒后重连 (第{retry_count}次)...")
-                await asyncio.sleep(5)
+                # 指数退避：5秒, 10秒, 20秒, 40秒, 最多60秒
+                retry_delay = min(5 * (2 ** (retry_count - 1)), 60)
+                
+                # 🔥 分析关闭原因，采用不同的重连策略
+                close_code = e.code if hasattr(e, 'code') else None
+                close_reason = str(e)
+                
+                if "no close frame" in close_reason.lower():
+                    # 静默断开，可能是网络问题，使用较长的退避时间
+                    retry_delay = min(10 * (2 ** (retry_count - 1)), 120)  # 10秒, 20秒, 40秒, 最多120秒
+                    logger.warning(
+                        f"⚠️ WebSocket静默断开 (no close frame)，{retry_delay}秒后重连 (第{retry_count}次)...")
+                elif close_code == 1006:  # 异常关闭
+                    # 异常关闭，可能是服务器问题，使用中等退避时间
+                    retry_delay = min(5 * (2 ** (retry_count - 1)), 60)  # 5秒, 10秒, 20秒, 最多60秒
+                    logger.warning(
+                        f"⚠️ WebSocket异常关闭 (code={close_code})，{retry_delay}秒后重连 (第{retry_count}次)...")
+                else:
+                    # 正常关闭或其他原因，使用标准退避时间
+                    logger.warning(
+                        f"⚠️ WebSocket连接已关闭: {e}，{retry_delay}秒后重连 (第{retry_count}次)...")
+                
+                await asyncio.sleep(retry_delay)
                 continue  # 外层循环会自动重连
 
             except Exception as e:
-                # 🚀 取消心跳任务和数据超时检测任务
-                if self._heartbeat_task and not self._heartbeat_task.done():
-                    self._heartbeat_task.cancel()
-                    try:
-                        await self._heartbeat_task
-                    except asyncio.CancelledError:
-                        pass
+                # 🚀 取消数据超时检测任务（已移除主动心跳任务）
+                # if self._heartbeat_task and not self._heartbeat_task.done():
+                #     self._heartbeat_task.cancel()
+                #     try:
+                #         await self._heartbeat_task
+                #     except asyncio.CancelledError:
+                #         pass
                 
                 if self._data_timeout_task and not self._data_timeout_task.done():
                     self._data_timeout_task.cancel()
@@ -1784,21 +1828,31 @@ class LighterWebSocket(LighterBase):
             while self._running:
                 try:
                     if self._direct_ws and not self._direct_ws.closed:
-                        # 🔥 检查数据活跃度（如果超过60秒没有消息，记录警告）
+                        # 🔥 修复：发送心跳前更新最后活动时间（关键修复）
                         current_time = time.time()
-                        silence_time = current_time - self._last_message_time if self._last_message_time > 0 else 0
+                        # 先检查数据活跃度（在更新前）
+                        silence_time_before = current_time - self._last_message_time if self._last_message_time > 0 else 0
                         
-                        if silence_time > 60:
+                        if silence_time_before > 60:
                             logger.warning(
-                                f"⚠️  [主动心跳] 数据静默时间: {silence_time:.1f}秒 "
+                                f"⚠️  [主动心跳] 数据静默时间: {silence_time_before:.1f}秒 "
                                 f"(最后消息: {self._last_message_time:.1f})"
                             )
                         
+                        # 🔥 关键修复：更新最后消息时间，避免数据超时检测误判
+                        self._last_message_time = current_time
+                        
                         # 主动发送 pong
-                        pong_msg = json.dumps({"type": "pong"})
-                        await self._direct_ws.send(pong_msg)
-                        self._network_bytes_sent += len(pong_msg.encode('utf-8'))
-                        logger.debug(f"💚 [主动心跳] 发送 pong (数据静默: {silence_time:.1f}秒)")
+                        try:
+                            pong_msg = json.dumps({"type": "pong"})
+                            await self._direct_ws.send(pong_msg)
+                            self._network_bytes_sent += len(pong_msg.encode('utf-8'))
+                            # 🔥 改为INFO级别，确保能看到心跳发送记录
+                            logger.info(f"💚 [主动心跳] 发送 pong (静默时间: {silence_time_before:.1f}秒)")
+                        except Exception as send_error:
+                            # 🔥 心跳发送失败，记录错误
+                            logger.error(f"❌ [主动心跳] 发送 pong 失败: {send_error}")
+                            raise  # 重新抛出异常，让外层处理
                     else:
                         logger.debug("⚠️  [主动心跳] WebSocket 已关闭，停止心跳")
                         break
@@ -1893,21 +1947,31 @@ class LighterWebSocket(LighterBase):
         try:
             msg_type = data.get("type", "")
             channel = data.get("channel", "")
+            
+            # 🔥 诊断：记录所有消息类型（用于排查ping消息）
+            if msg_type in ["ping", "pong", "connected"]:
+                logger.info(f"🔍 [消息诊断] 收到消息: type={msg_type}, channel={channel}")
 
-            # 🔥 处理应用层心跳 ping/pong（关键修复！）
+            # 🔥 处理应用层心跳 ping/pong（最高优先级！）
+            # Lighter协议：服务器发送ping → 客户端必须回复pong
             # 参考官方 SDK: https://github.com/elliottech/lighter-python/blob/main/lighter/ws_client.py
             if msg_type == "ping":
                 # 🔥 更新最后消息时间（ping也算消息）
                 self._last_message_time = time.time()
                 
                 if self._direct_ws:
-                    pong_msg = {"type": "pong"}
-                    pong_str = json.dumps(pong_msg)
-                    # 🔥 统计发送的字节数
-                    self._network_bytes_sent += len(pong_str.encode('utf-8'))
-                    await self._direct_ws.send(pong_str)
-                    logger.debug("🏓 收到ping，已回复pong")
-                return  # ping/pong 不需要进一步处理
+                    try:
+                        # 🔥 立即回复pong，不进行任何其他处理
+                        pong_msg = {"type": "pong"}
+                        pong_str = json.dumps(pong_msg)
+                        # 🔥 统计发送的字节数
+                        self._network_bytes_sent += len(pong_str.encode('utf-8'))
+                        await self._direct_ws.send(pong_str)
+                        # 🔥 INFO级别，确保能看到被动心跳响应
+                        logger.info("🏓 [被动心跳] 收到ping，已立即回复pong")
+                    except Exception as e:
+                        logger.error(f"❌ [被动心跳] 回复pong失败: {e}")
+                return  # ping/pong 不需要进一步处理，立即返回
 
             # 只记录订单相关的消息，market_stats太频繁了
             if "account" in msg_type.lower():
