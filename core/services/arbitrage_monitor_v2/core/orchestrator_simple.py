@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import logging
 from typing import Dict, List, Optional
 from pathlib import Path
 
@@ -23,6 +24,18 @@ from ..analysis.opportunity_finder import OpportunityFinder
 from ..display.simple_printer import SimplePrinter
 from .health_monitor import HealthMonitor
 from ..history import SpreadHistoryRecorder
+
+# 🔥 使用统一日志系统配置（参考网格系统）
+from core.adapters.exchanges.utils.setup_logging import LoggingConfig
+
+# 🔥 配置日志记录器（写入文件）
+logger = LoggingConfig.setup_logger(
+    name=__name__,
+    log_file='arbitrage_monitor_v2.log',
+    console_formatter=None,  # 不输出到控制台，避免干扰UI
+    file_formatter='detailed',
+    level=logging.INFO
+)
 
 
 class ArbitrageOrchestratorSimple:
@@ -95,9 +108,11 @@ class ArbitrageOrchestratorSimple:
                     archive_after_days=self.config.spread_history_archive_after_days,
                     cleanup_interval_hours=self.config.spread_history_cleanup_interval_hours
                 )
-                print("✅ 历史记录功能已启用")
+                logger.info("✅ [历史记录] 历史记录功能已启用")
+                logger.info(f"📁 [历史记录] 数据目录: {self.config.spread_history_data_dir}")
+                logger.info(f"⏱️  [历史记录] 采样间隔: {self.config.spread_history_sample_interval_seconds}秒")
             except Exception as e:
-                print(f"⚠️  历史记录功能初始化失败（已禁用）: {e}")
+                logger.warning(f"⚠️  [历史记录] 历史记录功能初始化失败（已禁用）: {e}", exc_info=True)
                 self.history_recorder = None
         
         # 🎯 统计摘要定时器
@@ -135,7 +150,11 @@ class ArbitrageOrchestratorSimple:
         
         # 🔥 启动历史记录器（如果启用）
         if self.history_recorder:
+            logger.info("🚀 [历史记录] 正在启动历史记录器...")
             await self.history_recorder.start()
+            logger.info("✅ [历史记录] 历史记录器启动完成")
+        else:
+            logger.info("ℹ️  [历史记录] 历史记录功能未启用（配置中已禁用）")
         
         # 4. 启动健康监控
         await self.health_monitor.start(self.config.health_check_interval)
@@ -349,6 +368,10 @@ class ArbitrageOrchestratorSimple:
                         
                         # 🔥 历史记录（非阻塞，只写入内存，性能影响 < 0.01ms）
                         if self.config.spread_history_enabled and self.history_recorder:
+                            if opportunities:
+                                # 🔥 调试日志：记录检测到的套利机会数量
+                                if len(opportunities) > 0:
+                                    logger.info(f"📊 [历史记录] 检测到 {len(opportunities)} 个套利机会，开始记录...")
                             for opp in opportunities:
                                 # 非阻塞写入时间窗口缓存（< 0.001ms）
                                 await self.history_recorder.record_spread({
@@ -358,7 +381,7 @@ class ArbitrageOrchestratorSimple:
                                     'price_buy': opp.price_buy,
                                     'price_sell': opp.price_sell,
                                     'spread_pct': opp.spread_pct,
-                                    'funding_rate_diff_annual': opp.funding_rate_diff * 365 * 24 if opp.funding_rate_diff else None,
+                                    'funding_rate_diff_annual': opp.funding_rate_diff * 1095 * 100 if opp.funding_rate_diff else None,  # 🔥 年化资金费率差（8小时费率差 × 1095 × 100，转换为百分比形式，如54.71%）
                                     'size_buy': opp.size_buy,
                                     'size_sell': opp.size_sell,
                                 })
@@ -412,8 +435,8 @@ async def main():
     debug_config = DebugConfig.create_basic()
     
     # 创建调度器
-    config_path = Path("config/arbitrage_monitor.yaml")
-    orchestrator = ArbitrageOrchestrator(config_path, debug_config)
+    config_path = Path("config/arbitrage/monitor_v2.yaml")
+    orchestrator = ArbitrageOrchestratorSimple(config_path, debug_config)
     
     try:
         # 启动系统

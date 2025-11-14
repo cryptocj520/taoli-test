@@ -12,12 +12,13 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 from pathlib import Path
 import pandas as pd
+import re
 
 
 class SpreadHistoryReader:
     """历史数据查询器"""
     
-    def __init__(self, db_path: str = "data/spread_history.db"):
+    def __init__(self, db_path: str = "data/spread_history/spread_history.db"):
         """
         初始化查询器
         
@@ -25,6 +26,29 @@ class SpreadHistoryReader:
             db_path: SQLite数据库路径
         """
         self.db_path = Path(db_path)
+    
+    def _normalize_timestamp(self, timestamp_str: str) -> str:
+        """
+        标准化时间戳格式（转换为ISO格式，兼容数据库格式）
+        
+        Args:
+            timestamp_str: 时间戳字符串（格式：YYYY-MM-DD HH:MM:SS 或 YYYY-MM-DDTHH:MM:SS）
+            
+        Returns:
+            ISO格式时间戳字符串（YYYY-MM-DDTHH:MM:SS）
+        """
+        if not timestamp_str:
+            return timestamp_str
+        
+        # 如果已经是ISO格式（包含T），直接返回
+        if 'T' in timestamp_str:
+            return timestamp_str
+        
+        # 将标准格式转换为ISO格式
+        # 格式：YYYY-MM-DD HH:MM:SS -> YYYY-MM-DDTHH:MM:SS
+        timestamp_str = timestamp_str.replace(' ', 'T', 1)
+        
+        return timestamp_str
     
     def query_spread_history(
         self,
@@ -64,11 +88,13 @@ class SpreadHistoryReader:
         
         if start_date:
             query += " AND timestamp >= ?"
-            params.append(start_date)
+            # 🔥 标准化时间戳格式（转换为ISO格式，兼容数据库格式）
+            params.append(self._normalize_timestamp(start_date))
         
         if end_date:
             query += " AND timestamp <= ?"
-            params.append(end_date)
+            # 🔥 标准化时间戳格式（转换为ISO格式，兼容数据库格式）
+            params.append(self._normalize_timestamp(end_date))
         
         if min_spread is not None:
             query += " AND spread_pct >= ?"
@@ -132,11 +158,13 @@ class SpreadHistoryReader:
         
         if start_date:
             query += " AND timestamp >= ?"
-            params.append(start_date)
+            # 🔥 标准化时间戳格式（转换为ISO格式，兼容数据库格式）
+            params.append(self._normalize_timestamp(start_date))
         
         if end_date:
             query += " AND timestamp <= ?"
-            params.append(end_date)
+            # 🔥 标准化时间戳格式（转换为ISO格式，兼容数据库格式）
+            params.append(self._normalize_timestamp(end_date))
         
         query += " ORDER BY timestamp"
         

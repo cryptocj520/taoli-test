@@ -267,14 +267,14 @@ class UIComponents:
                 diff_annual = 0  # 🔥 初始化，用于样式判断
                 if opp.funding_rate_diff is not None:
                     # opp.funding_rate_diff 是8小时费率差（小数形式，如0.0001表示0.01%）
-                    rate_diff = opp.funding_rate_diff
+                    # 🔥 资金费率差应该永远为正数（绝对值差值）
+                    rate_diff = abs(opp.funding_rate_diff)  # 确保是正数
                     # 8小时差值（百分比）
                     diff_8h = float(rate_diff * 100)
                     # 年化差值：8小时差值 × 1095
                     diff_annual = diff_8h * 1095
-                    # 显示时保留符号，右对齐，固定宽度
-                    sign = "+" if rate_diff >= 0 else ""
-                    funding_rate_diff_str = f"{sign}{diff_annual:.1f}%".rjust(COL_WIDTH_FR_DIFF)
+                    # 费率差永远是正数，不需要符号，右对齐，固定宽度
+                    funding_rate_diff_str = f"{diff_annual:.1f}%".rjust(COL_WIDTH_FR_DIFF)
                 else:
                     funding_rate_diff_str = "-".rjust(COL_WIDTH_FR_DIFF)  # 🔥 右对齐
                 
@@ -292,8 +292,8 @@ class UIComponents:
                     f"{spread_pct_str} "  # 🔥 右对齐，后面有空格（与表头一致）
                 )
                 
-                # 🔥 资金费率差样式：绝对值>=40时使用白色，否则使用dim white
-                if funding_rate_diff_str.strip() != "-" and abs(diff_annual) >= 40:
+                # 🔥 资金费率差样式：>=40时使用白色，否则使用dim white
+                if funding_rate_diff_str.strip() != "-" and diff_annual >= 40:
                     funding_rate_diff_style = "white"
                 else:
                     funding_rate_diff_style = "dim white"
@@ -494,24 +494,24 @@ class UIComponents:
                     for ex1 in funding_rates:
                         for ex2 in funding_rates:
                             if ex1 != ex2:
-                                # v1算法：rate_diff = fr1 - fr2（直接相减，保留正负号）
-                                rate_diff = funding_rates[ex2] - funding_rates[ex1]
+                                # 🔥 资金费率差应该永远为正数（绝对值差值）
+                                rate_diff = abs(funding_rates[ex2] - funding_rates[ex1])
                                 # 8小时差值（百分比）
                                 diff_8h = float(rate_diff * 100)
                                 # 年化差值：8小时差值 × 1095
                                 diff_annual = diff_8h * 1095
-                                # 取绝对值最大的费率差
-                                if abs(diff_annual) > abs(max_diff_annual):
+                                # 取最大的费率差（已经是正数）
+                                if diff_annual > max_diff_annual:
                                     max_diff_annual = diff_annual
                     
                     if max_diff_annual != 0:
-                        sign = "+" if max_diff_annual >= 0 else ""
-                        funding_rate_diff_str = f"{sign}{max_diff_annual:.1f}%"
+                        # 费率差永远是正数，不需要符号
+                        funding_rate_diff_str = f"{max_diff_annual:.1f}%"
             
             # 🔥 费率差样式：绝对值>=40时使用白色，否则使用dim white
             # 使用Rich的Text对象为费率差列单独设置样式
             if funding_rate_diff_str != "—":
-                funding_rate_diff_style = "white" if abs(max_diff_annual) >= 40 else "dim white"
+                funding_rate_diff_style = "white" if max_diff_annual >= 40 else "dim white"
                 funding_rate_diff_text = Text(funding_rate_diff_str, style=funding_rate_diff_style)
             else:
                 funding_rate_diff_text = Text(funding_rate_diff_str, style="dim white")

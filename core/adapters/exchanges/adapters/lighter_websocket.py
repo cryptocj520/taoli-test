@@ -129,7 +129,7 @@ class LighterWebSocket(LighterBase):
         # 🔥 创建专门的价格日志器（只输出到文件，不显示在终端）
         self._price_logger = self._setup_price_logger()
 
-        logger.info("Lighter WebSocket客户端初始化完成")
+        logger.info("[Lighter] Lighter WebSocket客户端初始化完成")
     
     def get_network_stats(self) -> Dict[str, int]:
         """获取网络流量统计"""
@@ -210,7 +210,7 @@ class LighterWebSocket(LighterBase):
         """建立WebSocket连接"""
         try:
             if self._connected:
-                logger.warning("WebSocket已连接")
+                logger.warning("[Lighter] WebSocket已连接")
                 return
 
             # 🔥 保存事件循环引用（用于线程安全的回调调度）
@@ -222,10 +222,10 @@ class LighterWebSocket(LighterBase):
             # 注意：lighter的WsClient是同步的，需要在单独的线程中运行
             # 这里我们先不启动，等待订阅后再启动
             self._connected = True
-            logger.info("Lighter WebSocket准备就绪")
+            logger.info("[Lighter] Lighter WebSocket准备就绪")
 
         except Exception as e:
-            logger.error(f"WebSocket连接失败: {e}")
+            logger.error(f"❌ [Lighter] WebSocket连接失败: {e}")
             raise
 
     async def disconnect(self):
@@ -274,14 +274,14 @@ class LighterWebSocket(LighterBase):
                     pass
                 self._direct_ws = None
 
-            logger.info("✅ WebSocket已断开（包括直接订阅）")
+            logger.info("✅ [Lighter] WebSocket已断开（包括直接订阅）")
 
         except Exception as e:
-            logger.error(f"断开WebSocket时出错: {e}")
+            logger.error(f"❌ [Lighter] 断开WebSocket时出错: {e}")
 
     async def reconnect(self):
         """重新连接WebSocket"""
-        logger.info("尝试重新连接WebSocket...")
+        logger.info("[Lighter] 尝试重新连接WebSocket...")
 
         await self.disconnect()
         await asyncio.sleep(min(self._reconnect_attempts * 2, 30))
@@ -459,14 +459,14 @@ class LighterWebSocket(LighterBase):
                     logger.debug(f"发送market_stats订阅: market_index={market_index}")
                 except Exception as e:
                     failed_count += 1
-                    logger.error(f"发送market_stats订阅失败 (market_index={market_index}): {e}")
+                    logger.error(f"❌ [Lighter] 发送market_stats订阅失败 (market_index={market_index}): {e}")
             
             # 🔥 每批之间添加小延迟，确保WebSocket消息发送完毕
             if i + batch_size < total_count:
                 await asyncio.sleep(0.1)  # 100ms延迟
 
         if sent_count > 0:
-            logger.info(f"✅ market_stats订阅发送完成: 成功{sent_count}个，失败{failed_count}个")
+            logger.info(f"✅ [Lighter] market_stats订阅发送完成: 成功{sent_count}个，失败{failed_count}个")
 
     async def _send_orderbook_subscriptions(self):
         """发送订单簿订阅消息（支持批量发送，参考 test_sol_orderbook.py）"""
@@ -505,14 +505,14 @@ class LighterWebSocket(LighterBase):
                     logger.debug(f"发送订单簿订阅: {symbol} (market_index={market_index})")
                 except Exception as e:
                     failed_count += 1
-                    logger.error(f"发送订单簿订阅失败 (market_index={market_index}): {e}")
+                    logger.error(f"❌ [Lighter] 发送订单簿订阅失败 (market_index={market_index}): {e}")
             
             # 🔥 每批之间添加小延迟，确保WebSocket消息发送完毕
             if i + batch_size < total_count:
                 await asyncio.sleep(0.1)  # 100ms延迟
 
         if sent_count > 0:
-            logger.info(f"✅ 订单簿订阅发送完成: 成功{sent_count}个，失败{failed_count}个")
+            logger.info(f"✅ [Lighter] 订单簿订阅发送完成: 成功{sent_count}个，失败{failed_count}个")
 
     async def subscribe_trades(self, symbol: str, callback: Optional[Callable] = None):
         """
@@ -661,7 +661,7 @@ class LighterWebSocket(LighterBase):
                 f"✅ WebSocket已连接 - account: {self._subscribed_accounts[0] if self._subscribed_accounts else 'N/A'}")
 
         except Exception as e:
-            logger.error(f"创建WebSocket客户端失败: {e}")
+            logger.error(f"❌ [Lighter] 创建WebSocket客户端失败: {e}")
 
     async def _run_ws_client(self):
         """在异步任务中运行同步的WsClient"""
@@ -725,7 +725,7 @@ class LighterWebSocket(LighterBase):
                     self._trigger_ticker_callbacks(ticker)
 
         except Exception as e:
-            logger.error(f"处理订单簿更新失败: {e}")
+            logger.error(f"❌ [Lighter] 处理订单簿更新失败: {e}")
 
     def _on_account_update(self, account_id: str, account: Dict[str, Any]):
         """
@@ -863,7 +863,7 @@ class LighterWebSocket(LighterBase):
                         self._trigger_position_callbacks(position)
 
         except Exception as e:
-            logger.error(f"❌ 处理账户更新失败: {e}", exc_info=True)
+            logger.error(f"❌ [Lighter] 处理账户更新失败: {e}", exc_info=True)
 
     # ============= 数据解析 =============
 
@@ -923,7 +923,7 @@ class LighterWebSocket(LighterBase):
                         continue  # 忽略无效的 size 值
                     
         except Exception as e:
-            logger.error(f"❌ 初始化订单簿失败 (market_index={market_index}): {e}", exc_info=True)
+            logger.error(f"❌ [Lighter] 初始化订单簿失败 (market_index={market_index}): {e}", exc_info=True)
     
     def _apply_orderbook_update(self, market_index: int, orderbook_data: Dict[str, Any]):
         """
@@ -992,7 +992,7 @@ class LighterWebSocket(LighterBase):
                         local_book['asks'][price_str] = str(size)
                         
         except Exception as e:
-            logger.error(f"❌ 应用订单簿更新失败 (market_index={market_index}): {e}", exc_info=True)
+            logger.error(f"❌ [Lighter] 应用订单簿更新失败 (market_index={market_index}): {e}", exc_info=True)
     
     def _build_orderbook_from_local(self, symbol: str, market_index: int) -> Optional[OrderBookData]:
         """
@@ -1049,7 +1049,7 @@ class LighterWebSocket(LighterBase):
                 nonce=None
             )
         except Exception as e:
-            logger.error(f"❌ 构建订单簿失败 (symbol={symbol}, market_index={market_index}): {e}", exc_info=True)
+            logger.error(f"❌ [Lighter] 构建订单簿失败 (symbol={symbol}, market_index={market_index}): {e}", exc_info=True)
             return None
 
     def _parse_order_book(self, symbol: str, order_book: Dict[str, Any]) -> OrderBookData:
@@ -1120,7 +1120,7 @@ class LighterWebSocket(LighterBase):
                     raw_data.get("low_24h", last_price))
             )
         except Exception as e:
-            logger.error(f"提取ticker数据失败: {e}")
+            logger.error(f"❌ [Lighter] 提取ticker数据失败: {e}")
             return None
 
     def _parse_orders(self, orders_data: Dict[str, Any]) -> List[OrderData]:
@@ -1134,7 +1134,7 @@ class LighterWebSocket(LighterBase):
                 for order_info in order_list:
                     orders.append(self._parse_order(order_info, symbol))
             except Exception as e:
-                logger.error(f"解析订单失败: {e}")
+                logger.error(f"❌ [Lighter] 解析订单失败: {e}")
 
         return orders
 
@@ -1246,7 +1246,7 @@ class LighterWebSocket(LighterBase):
             )
 
         except Exception as e:
-            logger.error(f"解析WebSocket订单失败: {e}", exc_info=True)
+            logger.error(f"❌ [Lighter] 解析WebSocket订单失败: {e}", exc_info=True)
             return None
 
     def _parse_order(self, order_info: Dict[str, Any], symbol: str) -> OrderData:
@@ -1374,7 +1374,7 @@ class LighterWebSocket(LighterBase):
             return order_data
 
         except Exception as e:
-            logger.error(f"解析交易数据失败: {e}", exc_info=True)
+            logger.error(f"❌ [Lighter] 解析交易数据失败: {e}", exc_info=True)
             return None
 
     def _parse_positions(self, positions_data: Dict[str, Any]) -> List[PositionData]:
@@ -1419,7 +1419,7 @@ class LighterWebSocket(LighterBase):
                     raw_data=position_info
                 ))
             except Exception as e:
-                logger.error(f"解析持仓失败: {e}")
+                logger.error(f"❌ [Lighter] 解析持仓失败: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
 
@@ -1448,7 +1448,7 @@ class LighterWebSocket(LighterBase):
                 else:
                     callback(ticker)
             except Exception as e:
-                logger.error(f"ticker回调执行失败: {e}", exc_info=True)
+                logger.error(f"❌ [Lighter] ticker回调执行失败: {e}", exc_info=True)
 
     def _trigger_orderbook_callbacks(self, orderbook: OrderBookData):
         """触发订单簿回调（线程安全）"""
@@ -1484,7 +1484,7 @@ class LighterWebSocket(LighterBase):
                 else:
                     callback(trade)
             except Exception as e:
-                logger.error(f"成交回调执行失败: {e}")
+                logger.error(f"❌ [Lighter] 成交回调执行失败: {e}")
 
     def _trigger_order_callbacks(self, order: OrderData):
         """触发订单回调（线程安全，带错误捕获）"""
@@ -1514,7 +1514,7 @@ class LighterWebSocket(LighterBase):
                 else:
                     callback(order)
             except Exception as e:
-                logger.error(f"订单回调执行失败: {e}", exc_info=True)
+                logger.error(f"❌ [Lighter] 订单回调执行失败: {e}", exc_info=True)
 
     def _trigger_order_fill_callbacks(self, order: OrderData):
         """触发订单成交回调（线程安全，带错误捕获）"""
@@ -1543,7 +1543,7 @@ class LighterWebSocket(LighterBase):
                 else:
                     callback(order)
             except Exception as e:
-                logger.error(f"订单成交回调执行失败: {e}", exc_info=True)
+                logger.error(f"❌ [Lighter] 订单成交回调执行失败: {e}", exc_info=True)
 
     def _trigger_position_callbacks(self, position: PositionData):
         """触发持仓回调（线程安全）"""
@@ -1559,7 +1559,7 @@ class LighterWebSocket(LighterBase):
                 else:
                     callback(position)
             except Exception as e:
-                logger.error(f"持仓回调执行失败: {e}")
+                logger.error(f"❌ [Lighter] 持仓回调执行失败: {e}")
 
     # ============= 直接订阅account_all_orders =============
 
@@ -1613,18 +1613,18 @@ class LighterWebSocket(LighterBase):
                         lighter.SignerClient.DEFAULT_10_MIN_AUTH_EXPIRY
                     )
                     if err:
-                        logger.error(f"❌ 生成认证token失败: {err}")
+                        logger.error(f"❌ [Lighter] 生成认证token失败: {err}")
                         await asyncio.sleep(10)
                         continue
                     logger.debug(f"生成认证token成功")
                 except Exception as e:
-                    logger.error(f"❌ 生成认证token失败: {e}", exc_info=True)
+                    logger.error(f"❌ [Lighter] 生成认证token失败: {e}", exc_info=True)
                     await asyncio.sleep(10)
                     continue
 
                 # 连接WebSocket
                 ws_url = self.ws_url
-                logger.info(f"🔗 连接Lighter WebSocket...")
+                logger.info(f"🔗 [Lighter] 连接Lighter WebSocket...")
 
                 # 🚀 关键配置说明（参考测试脚本的稳定连接方案）：
                 # - ping_interval=None: 禁用客户端主动发送ping（Lighter使用应用层心跳）
@@ -1636,7 +1636,7 @@ class LighterWebSocket(LighterBase):
                     ping_timeout=None,     # 🚀 禁用超时（应用层处理心跳）
                     close_timeout=10       # 关闭超时
                 ) as ws:
-                    logger.info("✅ WebSocket已连接")
+                    logger.info("✅ [Lighter] WebSocket已连接")
                     self._direct_ws = ws
                     
                     # 🔥 记录连接建立时的时间戳（用于诊断）
@@ -1648,14 +1648,14 @@ class LighterWebSocket(LighterBase):
                     # 主动发送pong可能导致服务器断开连接
                     # self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
                     # logger.info("💓 主动心跳任务已启动 (每30秒主动发送pong)")
-                    logger.info("💓 心跳机制：被动响应模式（收到ping后回复pong）")
+                    logger.info("💓 [Lighter心跳] 心跳机制：被动响应模式（收到ping后回复pong）")
                     
                     # 🔥 初始化最后消息时间（连接建立时）
                     self._last_message_time = connection_start_time
                     
                     # 🚀 启动数据超时检测任务（参考 test_sol_orderbook.py）
                     self._data_timeout_task = asyncio.create_task(self._data_timeout_monitor())
-                    logger.info(f"⏱️  数据超时检测任务已启动 (超时阈值={self._data_timeout_seconds}秒)")
+                    logger.info(f"⏱️  [Lighter] 数据超时检测任务已启动 (超时阈值={self._data_timeout_seconds}秒)")
 
                     # 发送订阅消息
                     if self.account_index:
@@ -1702,7 +1702,7 @@ class LighterWebSocket(LighterBase):
                     # 🔥 如果是重连（retry_count > 0），增加重连次数统计
                     if retry_count > 0:
                         self._reconnect_count += 1
-                        logger.info(f"🔄 [重连统计] Lighter WebSocket重连成功 (总重连次数: {self._reconnect_count})")
+                        logger.info(f"🔄 [Lighter重连] Lighter WebSocket重连成功 (总重连次数: {self._reconnect_count})")
                     
                     # 重置重连计数（连接成功）
                     retry_count = 0
@@ -1722,16 +1722,16 @@ class LighterWebSocket(LighterBase):
                                 data_preview = json.loads(message)
                                 msg_type_preview = data_preview.get("type", "")
                                 if msg_type_preview == "ping" or "ping" in str(data_preview).lower():
-                                    logger.info(f"🔍 [PING诊断] 收到消息: {message[:200]}")  # 只记录前200字符
+                                    logger.info(f"🔍 [Lighter PING诊断] 收到消息: {message[:200]}")  # 只记录前200字符
                             except:
                                 pass
                             
                             data = json.loads(message)
                             await self._handle_direct_ws_message(data)
                         except json.JSONDecodeError as e:
-                            logger.error(f"❌ JSON解析失败: {e}")
+                            logger.error(f"❌ [Lighter] JSON解析失败: {e}")
                         except Exception as e:
-                            logger.error(f"❌ 处理消息失败: {e}", exc_info=True)
+                            logger.error(f"❌ [Lighter] 处理消息失败: {e}", exc_info=True)
 
             except websockets.exceptions.ConnectionClosedError as e:
                 # 🔥 诊断：记录连接断开时的状态
@@ -1741,25 +1741,20 @@ class LighterWebSocket(LighterBase):
                 connection_duration = current_time - self._connection_start_time if self._connection_start_time > 0 else 0
                 
                 logger.warning(
-                    f"🔍 [连接断开诊断] "
+                    f"🔍 [Lighter连接断开诊断] "
                     f"连接建立时间: {self._connection_start_time:.1f}, "
                     f"最后消息时间: {self._last_message_time:.1f}, "
                     f"距离最后消息: {last_msg_age:.1f}秒, "
                     f"连接持续时间: {connection_duration:.1f}秒"
                 )
                 
-                # 🚀 取消数据超时检测任务（已移除主动心跳任务）
-                if self._data_timeout_task and not self._data_timeout_task.done():
-                    self._data_timeout_task.cancel()
-                    try:
-                        await self._data_timeout_task
-                    except asyncio.CancelledError:
-                        pass
+                # 🔥 步骤1: 彻底清理旧连接
+                await self._cleanup_old_connection()
                 
-                # 🔥 改进：使用指数退避策略，避免频繁重连
+                # 🔥 改进：使用指数退避策略，最大等待时间为3分钟（180秒）
                 retry_count += 1
-                # 指数退避：5秒, 10秒, 20秒, 40秒, 最多60秒
-                retry_delay = min(5 * (2 ** (retry_count - 1)), 60)
+                # 指数退避：5秒, 10秒, 20秒, 40秒, 80秒, 160秒, 最多180秒（3分钟）
+                retry_delay = min(5 * (2 ** (retry_count - 1)), 180)
                 
                 # 🔥 分析关闭原因，采用不同的重连策略
                 close_code = e.code if hasattr(e, 'code') else None
@@ -1767,12 +1762,12 @@ class LighterWebSocket(LighterBase):
                 
                 if "no close frame" in close_reason.lower():
                     # 静默断开，可能是网络问题，使用较长的退避时间
-                    retry_delay = min(10 * (2 ** (retry_count - 1)), 120)  # 10秒, 20秒, 40秒, 最多120秒
+                    retry_delay = min(10 * (2 ** (retry_count - 1)), 180)  # 10秒, 20秒, 40秒, 80秒, 160秒, 最多180秒
                     logger.warning(
                         f"⚠️ WebSocket静默断开 (no close frame)，{retry_delay}秒后重连 (第{retry_count}次)...")
                 elif close_code == 1006:  # 异常关闭
                     # 异常关闭，可能是服务器问题，使用中等退避时间
-                    retry_delay = min(5 * (2 ** (retry_count - 1)), 60)  # 5秒, 10秒, 20秒, 最多60秒
+                    retry_delay = min(5 * (2 ** (retry_count - 1)), 180)  # 5秒, 10秒, 20秒, 40秒, 80秒, 160秒, 最多180秒
                     logger.warning(
                         f"⚠️ WebSocket异常关闭 (code={close_code})，{retry_delay}秒后重连 (第{retry_count}次)...")
                 else:
@@ -1784,24 +1779,13 @@ class LighterWebSocket(LighterBase):
                 continue  # 外层循环会自动重连
 
             except Exception as e:
-                # 🚀 取消数据超时检测任务（已移除主动心跳任务）
-                # if self._heartbeat_task and not self._heartbeat_task.done():
-                #     self._heartbeat_task.cancel()
-                #     try:
-                #         await self._heartbeat_task
-                #     except asyncio.CancelledError:
-                #         pass
-                
-                if self._data_timeout_task and not self._data_timeout_task.done():
-                    self._data_timeout_task.cancel()
-                    try:
-                        await self._data_timeout_task
-                    except asyncio.CancelledError:
-                        pass
+                # 🔥 步骤1: 彻底清理旧连接
+                await self._cleanup_old_connection()
                 
                 # 🔥 修复2：捕获所有异常，确保任务不退出
                 retry_count += 1
-                retry_delay = min(retry_count * 5, 60)  # 指数退避，最多60秒
+                # 指数退避：5秒, 10秒, 20秒, 40秒, 80秒, 160秒, 最多180秒（3分钟）
+                retry_delay = min(5 * (2 ** (retry_count - 1)), 180)
                 logger.error(
                     f"❌ 直接WebSocket订阅失败 (第{retry_count}次): {e}，"
                     f"{retry_delay}秒后重连...",
@@ -1811,6 +1795,58 @@ class LighterWebSocket(LighterBase):
                 # 外层循环会自动重连
 
         logger.info("🛑 WebSocket订阅任务已停止")
+    
+    async def _cleanup_old_connection(self):
+        """
+        🔥 清理旧连接：确保完全退出并清理所有旧连接资源
+        
+        在重连前调用此方法，确保：
+        1. 关闭旧的WebSocket连接
+        2. 取消所有相关任务
+        3. 清理连接状态
+        """
+        try:
+            logger.info("🧹 [Lighter重连] 开始清理旧连接...")
+            
+            # 1. 取消数据超时检测任务
+            if self._data_timeout_task and not self._data_timeout_task.done():
+                self._data_timeout_task.cancel()
+                try:
+                    await self._data_timeout_task
+                except asyncio.CancelledError:
+                    pass
+                logger.debug("✅ [Lighter重连] 数据超时检测任务已取消")
+            
+            # 2. 取消心跳任务（如果存在）
+            if self._heartbeat_task and not self._heartbeat_task.done():
+                self._heartbeat_task.cancel()
+                try:
+                    await self._heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+                logger.debug("✅ [Lighter重连] 心跳任务已取消")
+            
+            # 3. 关闭旧的WebSocket连接
+            if self._direct_ws:
+                try:
+                    if not self._direct_ws.closed:
+                        await self._direct_ws.close()
+                        logger.debug("✅ [Lighter重连] 旧WebSocket连接已关闭")
+                except Exception as close_error:
+                    logger.warning(f"⚠️ [Lighter重连] 关闭旧连接时出错: {close_error}")
+                finally:
+                    # 确保引用被清空
+                    self._direct_ws = None
+                    logger.debug("✅ [Lighter重连] WebSocket引用已清空")
+            
+            # 4. 重置连接状态
+            self._connection_start_time = 0
+            self._last_message_time = 0
+            
+            logger.info("✅ [Lighter重连] 旧连接清理完成")
+            
+        except Exception as e:
+            logger.error(f"❌ [Lighter重连] 清理旧连接时出错: {e}", exc_info=True)
     
     async def _heartbeat_loop(self):
         """
@@ -1950,7 +1986,7 @@ class LighterWebSocket(LighterBase):
             
             # 🔥 诊断：记录所有消息类型（用于排查ping消息）
             if msg_type in ["ping", "pong", "connected"]:
-                logger.info(f"🔍 [消息诊断] 收到消息: type={msg_type}, channel={channel}")
+                logger.info(f"🔍 [Lighter消息诊断] 收到消息: type={msg_type}, channel={channel}")
 
             # 🔥 处理应用层心跳 ping/pong（最高优先级！）
             # Lighter协议：服务器发送ping → 客户端必须回复pong
@@ -1968,9 +2004,9 @@ class LighterWebSocket(LighterBase):
                         self._network_bytes_sent += len(pong_str.encode('utf-8'))
                         await self._direct_ws.send(pong_str)
                         # 🔥 INFO级别，确保能看到被动心跳响应
-                        logger.info("🏓 [被动心跳] 收到ping，已立即回复pong")
+                        logger.info("🏓 [Lighter心跳] 收到ping，已立即回复pong")
                     except Exception as e:
-                        logger.error(f"❌ [被动心跳] 回复pong失败: {e}")
+                        logger.error(f"❌ [Lighter心跳] 回复pong失败: {e}")
                 return  # ping/pong 不需要进一步处理，立即返回
 
             # 只记录订单相关的消息，market_stats太频繁了
@@ -2109,11 +2145,11 @@ class LighterWebSocket(LighterBase):
                                             else:
                                                 callback(order)
                                 else:
-                                    logger.warning(f"⚠️ 订单解析失败: {order_info}")
+                                    logger.warning(f"⚠️ [Lighter] 订单解析失败: {order_info}")
 
             # 处理订阅确认
             elif msg_type.startswith("subscribed/"):
-                logger.info(f"✅ 订阅成功: {channel or msg_type}")
+                logger.info(f"✅ [Lighter] 订阅成功: {channel or msg_type}")
 
             # 🔥 处理market_stats更新
             elif msg_type in ("subscribed/market_stats", "update/market_stats") and "market_stats" in data:
@@ -2144,12 +2180,12 @@ class LighterWebSocket(LighterBase):
                             if order_book_data:
                                 # 缓存订单簿
                                 self._order_books[symbol] = order_book_data
-                                logger.info(f"✅ {symbol} 订单簿订阅成功 (快照已加载): bid={order_book_data.best_bid.price if order_book_data.best_bid else 'N/A'}, ask={order_book_data.best_ask.price if order_book_data.best_ask else 'N/A'}")
+                                logger.info(f"✅ [Lighter] {symbol} 订单簿订阅成功 (快照已加载): bid={order_book_data.best_bid.price if order_book_data.best_bid else 'N/A'}, ask={order_book_data.best_ask.price if order_book_data.best_ask else 'N/A'}")
                                 
                                 # 触发回调
                                 self._trigger_orderbook_callbacks(order_book_data)
                 except Exception as e:
-                    logger.error(f"❌ 处理订单簿订阅确认失败: {e}", exc_info=True)
+                    logger.error(f"❌ [Lighter] 处理订单簿订阅确认失败: {e}", exc_info=True)
             
             elif msg_type == "update/order_book":
                 # 增量更新
@@ -2187,7 +2223,7 @@ class LighterWebSocket(LighterBase):
 
             # 处理订阅确认（通用，但订单簿和market_stats已在上面单独处理）
             elif msg_type.startswith("subscribed/"):
-                logger.info(f"✅ 订阅成功: {channel or msg_type}")
+                logger.info(f"✅ [Lighter] 订阅成功: {channel or msg_type}")
 
             # 处理未知消息类型
             else:

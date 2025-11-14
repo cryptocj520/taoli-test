@@ -790,6 +790,74 @@ class LighterAdapter(ExchangeAdapter):
         if callback:
             self._position_callbacks.append(callback)
         await self._websocket.subscribe_positions(callback)
+    
+    async def batch_subscribe_tickers(self, symbols: List[str], callback: Optional[Callable] = None) -> None:
+        """
+        批量订阅多个交易对的ticker数据（参考套利监控的订阅方式）
+        
+        Lighter的批量订阅策略：
+        1. 第一个symbol注册回调，后续传None复用统一回调
+        2. WebSocket内部会批量发送订阅消息
+        
+        Args:
+            symbols: 交易对符号列表
+            callback: 数据回调函数（只对第一个symbol注册）
+        """
+        if not symbols:
+            self.logger.warning("批量订阅ticker: 符号列表为空")
+            return
+        
+        self.logger.info(f"📊 开始批量订阅ticker: {len(symbols)} 个交易对")
+        
+        # 🔥 Lighter批量订阅策略：第一个注册回调，后续传None复用
+        for idx, symbol in enumerate(symbols):
+            try:
+                if idx == 0:
+                    # 第一个symbol：注册回调
+                    await self.subscribe_ticker(symbol, callback)
+                    self.logger.info(f"✅ {symbol} (首次注册统一回调)")
+                else:
+                    # 后续symbol：传None复用统一回调
+                    await self.subscribe_ticker(symbol, None)
+                    self.logger.debug(f"✅ {symbol} (复用统一回调)")
+            except Exception as e:
+                self.logger.error(f"❌ 批量订阅失败: {symbol} | 原因: {e}")
+        
+        self.logger.info(f"✅ 批量订阅完成: {len(symbols)} 个交易对")
+    
+    async def batch_subscribe_orderbooks(self, symbols: List[str], callback: Optional[Callable] = None) -> None:
+        """
+        批量订阅多个交易对的订单簿数据（参考套利监控的订阅方式）
+        
+        Lighter的批量订阅策略：
+        1. 第一个symbol注册回调，后续传None复用统一回调
+        2. WebSocket内部会批量发送订阅消息
+        
+        Args:
+            symbols: 交易对符号列表
+            callback: 数据回调函数（只对第一个symbol注册）
+        """
+        if not symbols:
+            self.logger.warning("批量订阅订单簿: 符号列表为空")
+            return
+        
+        self.logger.info(f"📊 开始批量订阅订单簿: {len(symbols)} 个交易对")
+        
+        # 🔥 Lighter批量订阅策略：第一个注册回调，后续传None复用
+        for idx, symbol in enumerate(symbols):
+            try:
+                if idx == 0:
+                    # 第一个symbol：注册回调
+                    await self.subscribe_orderbook(symbol, callback)
+                    self.logger.info(f"✅ {symbol} (首次注册统一回调)")
+                else:
+                    # 后续symbol：传None复用统一回调
+                    await self.subscribe_orderbook(symbol, None)
+                    self.logger.debug(f"✅ {symbol} (复用统一回调)")
+            except Exception as e:
+                self.logger.error(f"❌ 批量订阅订单簿失败: {symbol} | 原因: {e}")
+        
+        self.logger.info(f"✅ 批量订阅订单簿完成: {len(symbols)} 个交易对")
 
     async def unsubscribe_ticker(self, symbol: str):
         """取消订阅ticker"""

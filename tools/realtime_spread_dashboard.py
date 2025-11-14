@@ -34,7 +34,7 @@ def main():
     # 数据库路径配置
     db_path = st.sidebar.text_input(
         "数据库路径",
-        value="data/spread_history.db",
+        value="data/spread_history/spread_history.db",
         help="SQLite数据库文件路径"
     )
     
@@ -128,15 +128,17 @@ def main():
             df = reader.query_symbol_trend(symbol, start_date, end_date)
         
         if len(df) > 0:
-            # 创建图表
+            # 🔥 创建两个独立的图表：价差图表和资金费率差图表
+            
+            # 1. 价差图表
+            st.subheader("📊 价差走势")
             if chart_style == "心电图样式":
-                fig = generator.create_ecg_style_chart(df, symbol)
+                spread_fig = generator.create_ecg_style_chart(df, symbol)
             else:
-                fig = generator.create_spread_chart(df, symbol)
+                spread_fig = generator.create_spread_chart(df, symbol)
+            st.plotly_chart(spread_fig, use_container_width=True)
             
-            chart_placeholder.plotly_chart(fig, use_container_width=True)
-            
-            # 显示统计信息
+            # 价差统计信息
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 current_spread = df['spread_pct'].iloc[-1] if len(df) > 0 else 0
@@ -147,6 +149,47 @@ def main():
                 st.metric("最大价差", f"{df['spread_pct'].max():.4f}%")
             with col4:
                 st.metric("数据点数", len(df))
+            
+            # 2. 资金费率差图表（独立显示）
+            st.subheader("💰 资金费率差走势")
+            if 'funding_rate_diff_annual' in df.columns and df['funding_rate_diff_annual'].notna().any():
+                if chart_style == "心电图样式":
+                    funding_fig = generator.create_funding_rate_chart(df, symbol, style="ecg")
+                else:
+                    funding_fig = generator.create_funding_rate_chart(df, symbol, style="normal")
+                st.plotly_chart(funding_fig, use_container_width=True)
+                
+                # 资金费率差统计信息（使用正确计算的年化值）
+                # 🔥 从8小时费率差计算年化值，不使用数据库中可能错误的年化值
+                # funding_rate_diff是小数形式（如0.0001表示0.01%），年化后需要乘以100显示为百分比
+                # 🔥 资金费率差应该永远为正数（绝对值差值）
+                if 'funding_rate_diff' in df.columns:
+                    df['funding_rate_diff_annual_calculated'] = abs(df['funding_rate_diff']) * 1095 * 100
+                    valid_funding = df[df['funding_rate_diff_annual_calculated'].notna()]
+                else:
+                    valid_funding = df[df['funding_rate_diff_annual'].notna()].copy()
+                    if len(valid_funding) > 0:
+                        # 如果存储的年化值看起来是小数形式（绝对值小于1），需要乘以100
+                        # 🔥 资金费率差应该永远为正数（绝对值差值）
+                        sample_value = valid_funding['funding_rate_diff_annual'].iloc[0]
+                        if abs(sample_value) < 1:
+                            valid_funding['funding_rate_diff_annual_calculated'] = abs(valid_funding['funding_rate_diff_annual']) * 100
+                        else:
+                            valid_funding['funding_rate_diff_annual_calculated'] = abs(valid_funding['funding_rate_diff_annual'])
+                
+                if len(valid_funding) > 0:
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        current_funding = valid_funding['funding_rate_diff_annual_calculated'].iloc[-1]
+                        st.metric("当前资金费率差", f"{current_funding:.4f}%")
+                    with col2:
+                        st.metric("平均资金费率差", f"{valid_funding['funding_rate_diff_annual_calculated'].mean():.4f}%")
+                    with col3:
+                        st.metric("最大资金费率差", f"{valid_funding['funding_rate_diff_annual_calculated'].max():.4f}%")
+                    with col4:
+                        st.metric("最小资金费率差", f"{valid_funding['funding_rate_diff_annual_calculated'].min():.4f}%")
+            else:
+                st.info("ℹ️ 暂无资金费率差数据")
             
             # 显示时间范围信息
             st.caption(

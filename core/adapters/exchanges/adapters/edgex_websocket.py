@@ -14,9 +14,12 @@ import asyncio
 import time
 import json
 import aiohttp
+import logging
 from typing import Dict, List, Optional, Any, Callable
 from decimal import Decimal
 from datetime import datetime
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 # 尝试导入官方SDK
 try:
@@ -36,6 +39,8 @@ class EdgeXWebSocket(EdgeXBase):
     def __init__(self, config=None, logger=None):
         super().__init__(config)
         self.logger = logger
+        # 🔥 确保logger有文件handler（与Lighter保持一致）
+        self._setup_logger()
         if config and hasattr(config, 'ws_url') and config.ws_url:
             self.ws_url = config.ws_url
         else:
@@ -88,17 +93,17 @@ class EdgeXWebSocket(EdgeXBase):
                 )
                 self._use_sdk = True
                 if self.logger:
-                    self.logger.info("✅ EdgeX官方SDK WebSocketManager初始化成功")
+                    self.logger.info("✅ [EdgeX] 官方SDK WebSocketManager初始化成功")
             except Exception as e:
                 if self.logger:
-                    self.logger.warning(f"⚠️  EdgeX官方SDK WebSocketManager初始化失败，使用HTTP WebSocket: {e}")
+                    self.logger.warning(f"⚠️ [EdgeX] 官方SDK WebSocketManager初始化失败，使用HTTP WebSocket: {e}")
                 self._use_sdk = False
         else:
             if self.logger and EDGEX_SDK_AVAILABLE:
-                self.logger.info("ℹ️  EdgeX认证信息未配置，使用公共HTTP WebSocket")
+                self.logger.info("ℹ️ [EdgeX] 认证信息未配置，使用公共HTTP WebSocket")
             elif not EDGEX_SDK_AVAILABLE:
                 if self.logger:
-                    self.logger.info("ℹ️  EdgeX官方SDK未安装，使用HTTP WebSocket")
+                    self.logger.info("ℹ️ [EdgeX] 官方SDK未安装，使用HTTP WebSocket")
 
     async def _check_network_connectivity(self) -> bool:
         """检查网络连通性"""
@@ -113,7 +118,7 @@ class EdgeXWebSocket(EdgeXBase):
                     
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"🌐 网络连通性检查失败: {e}")
+                self.logger.warning(f"⚠️ [EdgeX] 网络连通性检查失败: {e}")
             return False
 
     async def _check_exchange_connectivity(self) -> bool:
@@ -130,7 +135,7 @@ class EdgeXWebSocket(EdgeXBase):
                     
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"🏢 EdgeX服务器连通性检查失败: {e}")
+                self.logger.warning(f"⚠️ [EdgeX] 服务器连通性检查失败: {e}")
             return False
 
     def _is_connection_usable(self) -> bool:
@@ -169,7 +174,7 @@ class EdgeXWebSocket(EdgeXBase):
         try:
             if not self._is_connection_usable():
                 if self.logger:
-                    self.logger.warning("⚠️ WebSocket连接不可用，无法发送消息")
+                    self.logger.warning("⚠️ [EdgeX] WebSocket连接不可用，无法发送消息")
                 return False
             
             # 🔥 统计发送的字节数
@@ -180,7 +185,7 @@ class EdgeXWebSocket(EdgeXBase):
             return True
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"发送WebSocket消息失败: {e}")
+                self.logger.warning(f"❌ [EdgeX] 发送WebSocket消息失败: {e}")
             return False
 
     async def _send_websocket_ping(self) -> None:
@@ -192,23 +197,23 @@ class EdgeXWebSocket(EdgeXBase):
                 # 🔥 ping成功，重置失败计数器
                 self._ping_failure_count = 0
                 if self.logger:
-                    self.logger.debug("🏓 EdgeX发送WebSocket ping")
+                    self.logger.info("🏓 [EdgeX心跳] 发送WebSocket ping")
             else:
                 # 🔥 ping检查失败，增加失败计数
                 self._ping_failure_count += 1
                 if self.logger:
-                    self.logger.warning(f"⚠️ 无法发送ping，WebSocket连接不可用 (失败次数: {self._ping_failure_count})")
+                    self.logger.warning(f"⚠️ [EdgeX心跳] 无法发送ping，WebSocket连接不可用 (失败次数: {self._ping_failure_count})")
                 # 🔥 多次失败后才触发重连 (改为2次失败)
                 if self._ping_failure_count >= 2:
                     self._ws_connected = False
                     self._last_heartbeat = time.time() - 180  # 超过120秒阈值
                     if self.logger:
-                        self.logger.info(f"🔄 连续{self._ping_failure_count}次ping失败，触发重连")
+                        self.logger.info(f"🔄 [EdgeX心跳] 连续{self._ping_failure_count}次ping失败，触发重连")
         except Exception as e:
             # 🔥 ping异常，增加失败计数
             self._ping_failure_count += 1
             if self.logger:
-                self.logger.error(f"❌ EdgeX发送ping失败: {str(e)} (失败次数: {self._ping_failure_count})")
+                self.logger.error(f"❌ [EdgeX心跳] 发送ping失败: {str(e)} (失败次数: {self._ping_failure_count})")
             # 🔥 多次失败后才触发重连
             if self._ping_failure_count >= 2:
                 self._ws_connected = False
@@ -216,11 +221,53 @@ class EdgeXWebSocket(EdgeXBase):
                 if self.logger:
                     self.logger.info(f"🔄 连续{self._ping_failure_count}次ping异常，触发重连")
 
+    def _setup_logger(self):
+        """设置logger的文件handler（与Lighter保持一致，不输出到终端）"""
+        if not self.logger:
+            return
+        
+        # 🔥 关键：阻止日志传播到父logger，避免输出到控制台
+        self.logger.propagate = False
+        
+        # 🔥 移除所有StreamHandler（控制台输出），只保留文件输出
+        handlers_to_remove = []
+        for handler in self.logger.handlers:
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, RotatingFileHandler):
+                handlers_to_remove.append(handler)
+        for handler in handlers_to_remove:
+            self.logger.removeHandler(handler)
+        
+        # 确保logs目录存在
+        Path("logs").mkdir(parents=True, exist_ok=True)
+        
+        # 检查是否已有文件handler
+        has_file_handler = any(
+            isinstance(h, RotatingFileHandler) and 'ExchangeAdapter.log' in str(h.baseFilename)
+            for h in self.logger.handlers
+        )
+        
+        if not has_file_handler:
+            # 添加文件handler
+            file_handler = RotatingFileHandler(
+                'logs/ExchangeAdapter.log',
+                maxBytes=10*1024*1024,  # 10MB
+                backupCount=3,
+                encoding='utf-8'
+            )
+            file_handler.setLevel(logging.INFO)
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+            )
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+            self.logger.setLevel(logging.INFO)  # 确保logger级别至少是INFO
+            self.logger.info("✅ EdgeX WebSocket logger文件handler已配置（仅输出到文件）")
+
     async def connect(self) -> bool:
         """建立WebSocket连接"""
         try:
             if self.logger:
-                self.logger.info(f"🔌 EdgeX正在建立WebSocket连接: {self.ws_url}")
+                self.logger.info(f"🔌 [EdgeX] 正在建立WebSocket连接: {self.ws_url}")
             
             # 使用aiohttp建立WebSocket连接
             if not hasattr(self, '_session') or (hasattr(self, '_session') and self._session.closed):
@@ -228,7 +275,7 @@ class EdgeXWebSocket(EdgeXBase):
             self._ws_connection = await self._session.ws_connect(self.ws_url)
             
             if self.logger:
-                self.logger.info(f"✅ EdgeX WebSocket连接已建立: {self.ws_url}")
+                self.logger.info(f"✅ [EdgeX] WebSocket连接已建立: {self.ws_url}")
             
             # 初始化状态
             self._ws_connected = True
@@ -251,20 +298,20 @@ class EdgeXWebSocket(EdgeXBase):
             # 启动心跳检测
             self._heartbeat_task = asyncio.create_task(self._websocket_heartbeat_loop())
             if self.logger:
-                self.logger.info("💓 EdgeX心跳检测已启动")
+                self.logger.info("💓 [EdgeX心跳] 心跳检测已启动")
             
             return True
             
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"建立EdgeX WebSocket连接失败: {e}")
+                self.logger.warning(f"❌ [EdgeX] WebSocket连接失败: {e}")
             self._ws_connected = False
             return False
 
     async def disconnect(self) -> None:
         """断开WebSocket连接"""
         if self.logger:
-            self.logger.info("🔄 开始断开EdgeX WebSocket连接...")
+            self.logger.info("🔄 [EdgeX] 开始断开WebSocket连接...")
         
         try:
             # 1. 标记为断开状态，停止新的操作
@@ -273,64 +320,64 @@ class EdgeXWebSocket(EdgeXBase):
             # 2. 取消心跳任务
             if hasattr(self, '_heartbeat_task') and self._heartbeat_task and not self._heartbeat_task.done():
                 if self.logger:
-                    self.logger.info("🛑 取消EdgeX心跳任务...")
+                    self.logger.info("🛑 [EdgeX心跳] 取消心跳任务...")
                 self._heartbeat_task.cancel()
                 try:
                     await asyncio.wait_for(self._heartbeat_task, timeout=2.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
                 if self.logger:
-                    self.logger.info("✅ EdgeX心跳任务已停止")
+                    self.logger.info("✅ [EdgeX心跳] 心跳任务已停止")
             
             # 3. 取消消息处理任务
             if hasattr(self, '_ws_handler_task') and self._ws_handler_task and not self._ws_handler_task.done():
                 if self.logger:
-                    self.logger.info("🛑 取消EdgeX消息处理任务...")
+                    self.logger.info("🛑 [EdgeX] 取消消息处理任务...")
                 self._ws_handler_task.cancel()
                 try:
                     await asyncio.wait_for(self._ws_handler_task, timeout=2.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
                 if self.logger:
-                    self.logger.info("✅ EdgeX消息处理任务已停止")
+                    self.logger.info("✅ [EdgeX] 消息处理任务已停止")
             
             # 4. 关闭WebSocket连接
             if hasattr(self, '_ws_connection') and self._ws_connection and not self._ws_connection.closed:
                 if self.logger:
-                    self.logger.info("🛑 关闭EdgeX WebSocket连接...")
+                    self.logger.info("🛑 [EdgeX] 关闭WebSocket连接...")
                 try:
                     await asyncio.wait_for(self._ws_connection.close(), timeout=3.0)
                 except asyncio.TimeoutError:
                     if self.logger:
-                        self.logger.warning("⚠️ WebSocket关闭超时，强制设置为None")
+                        self.logger.warning("⚠️ [EdgeX] WebSocket关闭超时，强制设置为None")
                 self._ws_connection = None
                 if self.logger:
-                    self.logger.info("✅ EdgeX WebSocket连接已关闭")
+                    self.logger.info("✅ [EdgeX] WebSocket连接已关闭")
             
             # 5. 关闭session
             if hasattr(self, '_session') and self._session and not self._session.closed:
                 if self.logger:
-                    self.logger.info("🛑 关闭EdgeX session...")
+                    self.logger.info("🛑 [EdgeX] 关闭session...")
                 try:
                     await asyncio.wait_for(self._session.close(), timeout=3.0)
                 except asyncio.TimeoutError:
                     if self.logger:
-                        self.logger.warning("⚠️ Session关闭超时")
+                        self.logger.warning("⚠️ [EdgeX] Session关闭超时")
                 if self.logger:
-                    self.logger.info("✅ EdgeX session已关闭")
+                    self.logger.info("✅ [EdgeX] session已关闭")
             
             # 6. 清理状态变量
             self._last_heartbeat = 0
             self._reconnect_attempts = 0
             
             if self.logger:
-                self.logger.info("🎉 EdgeX WebSocket连接断开完成")
+                self.logger.info("🎉 [EdgeX] WebSocket连接断开完成")
                 
         except Exception as e:
             if self.logger:
-                self.logger.error(f"❌ 关闭EdgeX WebSocket连接时出错: {e}")
+                self.logger.error(f"❌ [EdgeX] 关闭WebSocket连接时出错: {e}")
                 import traceback
-                self.logger.error(f"断开连接错误堆栈: {traceback.format_exc()}")
+                self.logger.error(f"❌ [EdgeX] 断开连接错误堆栈: {traceback.format_exc()}")
             
             # 强制清理状态
             self._ws_connected = False
@@ -348,8 +395,8 @@ class EdgeXWebSocket(EdgeXBase):
         self._last_pong_time = time.time()
         
         if self.logger:
-            self.logger.info("💓 EdgeX优化心跳检测循环启动 (快速重连模式)")
-            self.logger.info(f"💓 EdgeX心跳参数: 检测间隔={heartbeat_interval}s, ping间隔={ping_interval}s, 最大静默={max_silence}s, 失败容忍=2次")
+            self.logger.info("💓 [EdgeX心跳] 优化心跳检测循环启动 (快速重连模式)")
+            self.logger.info(f"💓 [EdgeX心跳] 心跳参数: 检测间隔={heartbeat_interval}s, ping间隔={ping_interval}s, 最大静默={max_silence}s, 失败容忍=2次")
         
         try:
             while self._ws_connected:
@@ -373,7 +420,7 @@ class EdgeXWebSocket(EdgeXBase):
                         await self._send_websocket_ping()
                         self._last_ping_time = current_time
                         if self.logger:
-                            self.logger.debug(f"🏓 EdgeX心跳ping: 保持连接活跃")
+                            self.logger.info(f"🏓 [EdgeX心跳] 发送ping保持连接活跃")
                     
                     # === 💌 优化：综合判断重连条件 ===
                     silence_time = current_time - self._last_heartbeat
@@ -392,7 +439,7 @@ class EdgeXWebSocket(EdgeXBase):
                             reason.append(f"连续ping失败: {self._ping_failure_count}次")
                         
                         if self.logger:
-                            self.logger.warning(f"⚠️ EdgeX WebSocket准备重连: {', '.join(reason)}")
+                            self.logger.warning(f"⚠️ [EdgeX心跳] WebSocket准备重连: {', '.join(reason)}")
                         
                         # 检查是否已经在重连中
                         if hasattr(self, '_reconnecting') and self._reconnecting:
@@ -440,7 +487,7 @@ class EdgeXWebSocket(EdgeXBase):
                     continue
                 except Exception as e:
                     if self.logger:
-                        self.logger.error(f"❌ EdgeX心跳检测错误: {e}")
+                        self.logger.error(f"❌ [EdgeX心跳] 心跳检测错误: {e}")
                     # 错误后等待较短时间再继续
                     try:
                         await asyncio.wait_for(asyncio.sleep(5), timeout=10)  # 减少错误后的等待时间
@@ -452,10 +499,10 @@ class EdgeXWebSocket(EdgeXBase):
                 self.logger.info("💓 [EdgeX心跳] 心跳循环被正常取消")
         except Exception as e:
             if self.logger:
-                self.logger.error(f"❌ EdgeX心跳循环异常退出: {e}")
+                self.logger.error(f"❌ [EdgeX心跳] 心跳循环异常退出: {e}")
         finally:
             if self.logger:
-                self.logger.info("💓 EdgeX心跳检测循环已退出")
+                self.logger.info("💓 [EdgeX心跳] 心跳检测循环已退出")
             # 清理重连状态
             self._reconnecting = False
     
@@ -477,7 +524,7 @@ class EdgeXWebSocket(EdgeXBase):
             delay = min(base_delay * (2 ** min(self._reconnect_attempts - 3, 7)), max_delay)
         
         if self.logger:
-            self.logger.info(f"🔄 [EdgeX重连] 重连尝试 #{self._reconnect_attempts}，延迟{delay}s")
+                self.logger.info(f"🔄 [EdgeX重连] 重连尝试 #{self._reconnect_attempts}，延迟{delay}秒")
         
         reconnect_success = False
         
@@ -490,19 +537,19 @@ class EdgeXWebSocket(EdgeXBase):
             network_ok = await self._check_network_connectivity()
             if not network_ok:
                 if self.logger:
-                    self.logger.warning("⚠️ 基本网络连通性检查失败，跳过本次重连")
+                    self.logger.warning("⚠️ [EdgeX重连] 基本网络连通性检查失败，跳过本次重连")
                 return  # 网络不通，跳过本次重连
                 
             # 检查交易所服务器连通性
             exchange_ok = await self._check_exchange_connectivity()
             if self.logger:
                 status = "✅ 可达" if exchange_ok else "⚠️ 不可达"
-                self.logger.info(f"🏢 EdgeX服务器连通性: {status}")
+                self.logger.info(f"🏢 [EdgeX重连] 服务器连通性: {status}")
             
             # 🔥 优化：如果服务器不可达，增加延迟但不加倍
             if not exchange_ok:
                 if self.logger:
-                    self.logger.warning("⚠️ EdgeX服务器不可达，延迟重连")
+                    self.logger.warning("⚠️ [EdgeX重连] 服务器不可达，延迟重连")
                 delay = delay + 3  # 只增加3秒，而不是加倍
             
             # 步骤2: 彻底清理旧连接
@@ -540,7 +587,7 @@ class EdgeXWebSocket(EdgeXBase):
                 self._last_pong_time = current_time
                 
                 if self.logger:
-                    self.logger.info(f"🎉 [EdgeX重连] EdgeX WebSocket重连成功！ (总重连次数: {self._reconnect_count})")
+                    self.logger.info(f"🎉 [EdgeX重连] WebSocket重连成功！ (总重连次数: {self._reconnect_count})")
             else:
                 raise Exception("连接建立失败")
                 
@@ -553,7 +600,7 @@ class EdgeXWebSocket(EdgeXBase):
             if self.logger:
                 self.logger.error(f"❌ [EdgeX重连] EdgeX重连失败: {type(e).__name__}: {e}")
                 import traceback
-                self.logger.error(f"[EdgeX重连] 完整错误堆栈: {traceback.format_exc()}")
+                self.logger.error(f"❌ [EdgeX重连] 完整错误堆栈: {traceback.format_exc()}")
             
             # 重连失败处理 - 无限重试模式
             reconnect_success = False
@@ -561,7 +608,7 @@ class EdgeXWebSocket(EdgeXBase):
         # 🔥 优化：重连失败后的处理
         if not reconnect_success:
             if self.logger:
-                self.logger.warning(f"⚠️ EdgeX重连失败，将在下次心跳检测时继续重试 (已尝试{self._reconnect_attempts}次)")
+                self.logger.warning(f"⚠️ [EdgeX重连] 重连失败，将在下次心跳检测时继续重试 (已尝试{self._reconnect_attempts}次)")
             
             # 🔥 优化：重连失败后，适当降低心跳检测的敏感度
             if self._reconnect_attempts > 5:
@@ -754,7 +801,7 @@ class EdgeXWebSocket(EdgeXBase):
                     break
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"EdgeX WebSocket消息处理失败: {e}")
+                self.logger.warning(f"❌ [EdgeX] WebSocket消息处理失败: {e}")
             self._ws_connected = False
 
     async def _process_websocket_message(self, message: str) -> None:
@@ -769,13 +816,13 @@ class EdgeXWebSocket(EdgeXBase):
             # 处理连接确认消息
             if data.get('type') == 'connected':
                 if self.logger:
-                    self.logger.info(f"EdgeX WebSocket连接确认: {data.get('sid')}")
+                    self.logger.info(f"✅ [EdgeX] WebSocket连接确认: {data.get('sid')}")
                 return
 
             # 处理订阅确认消息
             if data.get('type') == 'subscribed':
                 if self.logger:
-                    self.logger.debug(f"EdgeX订阅成功: {data.get('channel')}")
+                    self.logger.debug(f"✅ [EdgeX] 订阅成功: {data.get('channel')}")
                 return
 
             # 处理ping消息
@@ -786,10 +833,10 @@ class EdgeXWebSocket(EdgeXBase):
                 }
                 if await self._safe_send_message(json.dumps(pong_message)):
                     if self.logger:
-                        self.logger.debug(f"发送pong响应: {data.get('time')}")
+                        self.logger.info(f"🏓 [EdgeX心跳] 收到ping，已回复pong: {data.get('time')}")
                 else:
                     if self.logger:
-                        self.logger.warning("发送pong响应失败")
+                        self.logger.warning("⚠️ [EdgeX心跳] 发送pong响应失败")
                 return
 
             # 处理数据消息
@@ -797,10 +844,15 @@ class EdgeXWebSocket(EdgeXBase):
                 channel = data.get('channel', '')
                 content = data.get('content', {})
                 
-                # 🔥 诊断日志：订单簿消息
+                # 🔥 诊断日志：订单簿消息（改为INFO级别，便于调试）
                 if channel.startswith('depth.'):
                     if self.logger:
                         self.logger.debug(f"📥 EdgeX收到订单簿消息: channel={channel}, dataType={content.get('dataType', 'unknown')}")
+                
+                # 🔥 诊断日志：ticker消息（改为INFO级别，便于调试）
+                if channel.startswith('ticker.'):
+                    if self.logger:
+                        self.logger.debug(f"📊 EdgeX收到ticker消息: channel={channel}")
                 
                 if channel.startswith('ticker.'):
                     await self._handle_ticker_update(channel, content)

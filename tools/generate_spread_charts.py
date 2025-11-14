@@ -28,7 +28,7 @@ def main():
     parser.add_argument('--style', type=str, choices=['ecg', 'normal', 'multi-channel'], 
                        default='ecg', help='图表样式')
     parser.add_argument('--output', type=str, help='输出文件路径（HTML格式）')
-    parser.add_argument('--db-path', type=str, default='data/spread_history.db', 
+    parser.add_argument('--db-path', type=str, default='data/spread_history/spread_history.db', 
                        help='数据库路径')
     
     args = parser.parse_args()

@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import logging
 from typing import Dict, List, Optional
 from pathlib import Path
 
@@ -21,6 +22,19 @@ from ..analysis.spread_calculator import SpreadCalculator
 from ..analysis.opportunity_finder import OpportunityFinder
 from ..display.ui_manager import UIManager
 from .health_monitor import HealthMonitor
+from ..history import SpreadHistoryRecorder
+
+# 🔥 使用统一日志系统配置（参考网格系统）
+from core.adapters.exchanges.utils.setup_logging import LoggingConfig
+
+# 🔥 配置日志记录器（写入文件）
+logger = LoggingConfig.setup_logger(
+    name=__name__,
+    log_file='arbitrage_monitor_v2.log',
+    console_formatter=None,  # 不输出到控制台，避免干扰UI
+    file_formatter='detailed',
+    level=logging.INFO
+)
 
 
 class ArbitrageOrchestrator:
@@ -83,6 +97,30 @@ class ArbitrageOrchestrator:
             data_timeout_seconds=self.config.data_timeout_seconds
         )
         
+        # 🔥 历史记录器（可选，根据配置启用）
+        self.history_recorder: Optional[SpreadHistoryRecorder] = None
+        if self.config.spread_history_enabled:
+            try:
+                self.history_recorder = SpreadHistoryRecorder(
+                    data_dir=self.config.spread_history_data_dir,
+                    sample_interval_seconds=self.config.spread_history_sample_interval_seconds,
+                    sample_strategy=self.config.spread_history_sample_strategy,
+                    batch_size=self.config.spread_history_batch_size,
+                    batch_timeout=self.config.spread_history_batch_timeout,
+                    queue_maxsize=self.config.spread_history_queue_maxsize,
+                    compress_after_days=self.config.spread_history_compress_after_days,
+                    archive_after_days=self.config.spread_history_archive_after_days,
+                    cleanup_interval_hours=self.config.spread_history_cleanup_interval_hours
+                )
+                logger.info("✅ [历史记录] 历史记录功能已启用")
+                logger.info(f"📁 [历史记录] 数据目录: {self.config.spread_history_data_dir}")
+                logger.info(f"⏱️  [历史记录] 采样间隔: {self.config.spread_history_sample_interval_seconds}秒")
+                # 🔥 诊断：确认日志配置
+                logger.info(f"🔍 [历史记录] Orchestrator日志配置检查: handlers={[type(h).__name__ for h in logger.handlers]}, level={logger.level}")
+            except Exception as e:
+                logger.warning(f"⚠️  [历史记录] 历史记录功能初始化失败（已禁用）: {e}", exc_info=True)
+                self.history_recorder = None
+        
         # 🎯 UI更新节流（避免每次分析都更新UI导致卡顿）
         self.last_ui_update_time: float = 0
         self.ui_update_interval: float = 1.0  # UI数据更新间隔（秒）
@@ -115,6 +153,14 @@ class ArbitrageOrchestrator:
         
         # 3. 启动数据处理器
         await self.data_processor.start()
+        
+        # 🔥 启动历史记录器（如果启用）
+        if self.history_recorder:
+            logger.info("🚀 [历史记录] 正在启动历史记录器...")
+            await self.history_recorder.start()
+            logger.info("✅ [历史记录] 历史记录器启动完成")
+        else:
+            logger.info("ℹ️  [历史记录] 历史记录功能未启用（配置中已禁用）")
         
         # 4. 启动健康监控
         await self.health_monitor.start(self.config.health_check_interval)
@@ -149,6 +195,15 @@ class ArbitrageOrchestrator:
         print("\n🛑 正在停止套利监控系统...")
         
         self.running = False
+        
+        # 🔥 停止历史记录器（如果启用）
+        if self.history_recorder:
+            try:
+                logger.info("🛑 [历史记录] 正在停止历史记录器...")
+                await asyncio.wait_for(self.history_recorder.stop(), timeout=3.0)
+                logger.info("✅ [历史记录] 历史记录器已停止")
+            except asyncio.TimeoutError:
+                logger.warning("⏱️  [历史记录] 历史记录器停止超时")
         
         # 停止所有任务
         for task in self.tasks:
@@ -321,6 +376,27 @@ class ArbitrageOrchestrator:
                         # 识别机会
                         opportunities = self.opportunity_finder.find_opportunities(spreads, funding_rates)
                         all_opportunities.extend(opportunities)
+                        
+                        # 🔥 历史记录（非阻塞，只写入内存，性能影响 < 0.01ms）
+                        # 🔥 每个代币在1分钟内只记录一次（去重机制在record_spread内部实现）
+                        if self.config.spread_history_enabled and self.history_recorder:
+                            for opp in opportunities:
+                                # 非阻塞写入时间窗口缓存（< 0.001ms）
+                                # 🔥 主要记录：价差百分比、资金费率、资金费率差
+                                await self.history_recorder.record_spread({
+                                    'symbol': opp.symbol,
+                                    'exchange_buy': opp.exchange_buy,
+                                    'exchange_sell': opp.exchange_sell,
+                                    'price_buy': opp.price_buy,
+                                    'price_sell': opp.price_sell,
+                                    'spread_pct': opp.spread_pct,  # 🔥 主要数据：价差百分比
+                                    'funding_rate_buy': opp.funding_rate_buy,  # 🔥 主要数据：买入交易所资金费率
+                                    'funding_rate_sell': opp.funding_rate_sell,  # 🔥 主要数据：卖出交易所资金费率
+                                    'funding_rate_diff': opp.funding_rate_diff,  # 🔥 主要数据：资金费率差（8小时费率差，小数形式，如0.0001表示0.01%）
+                                    'funding_rate_diff_annual': opp.funding_rate_diff * 1095 * 100 if opp.funding_rate_diff else None,  # 🔥 年化资金费率差（8小时费率差 × 1095 × 100，转换为百分比形式，如54.71%）
+                                    'size_buy': opp.size_buy,
+                                    'size_sell': opp.size_sell,
+                                })
                     
                     # 更新UI（传递价差数据，保证数据一致性）
                     self._update_ui(all_opportunities, symbol_spreads=symbol_spreads)
@@ -421,7 +497,7 @@ async def main():
     debug_config = DebugConfig.create_basic()
     
     # 创建调度器
-    config_path = Path("config/arbitrage_monitor.yaml")
+    config_path = Path("config/arbitrage/monitor_v2.yaml")
     orchestrator = ArbitrageOrchestrator(config_path, debug_config)
     
     try:

@@ -149,10 +149,10 @@ class OpportunityFinder:
                 opp.funding_rate_sell = funding_rates.get(spread.exchange_sell, {}).get(spread.symbol)
                 
                 if opp.funding_rate_buy is not None and opp.funding_rate_sell is not None:
-                    # v1算法：rate_diff = fr1 - fr2（直接相减，保留正负号）
-                    # v2中：funding_rate_diff = funding_rate_sell - funding_rate_buy
+                    # 🔥 资金费率差应该永远为正数（绝对值差值）
+                    # 例如：正数减去负数 = 正数，大负数减去小负数 = 正数
                     # 存储8小时费率差（小数形式，如0.0001表示0.01%）
-                    opp.funding_rate_diff = opp.funding_rate_sell - opp.funding_rate_buy
+                    opp.funding_rate_diff = abs(opp.funding_rate_sell - opp.funding_rate_buy)
                     funding_rate_diff = opp.funding_rate_diff
             
             # 🔥 混合模式：实时打印新发现的套利机会（包含资金费率差）

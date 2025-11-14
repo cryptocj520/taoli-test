@@ -15,22 +15,35 @@
 
 import asyncio
 import time
+import logging
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from pathlib import Path
 from collections import defaultdict
 
+# 🔥 使用统一日志系统配置（参考网格系统）
+from core.adapters.exchanges.utils.setup_logging import LoggingConfig
+
+# 🔥 配置日志记录器（写入文件）
+logger = LoggingConfig.setup_logger(
+    name=__name__,
+    log_file='spread_history.log',
+    console_formatter=None,  # 不输出到控制台，避免干扰UI
+    file_formatter='detailed',
+    level=logging.INFO
+)
+
 try:
     import aiofiles
 except ImportError:
     aiofiles = None
-    print("⚠️  aiofiles未安装，历史记录功能将无法使用。请运行: pip install aiofiles")
+    logger.warning("⚠️  aiofiles未安装，历史记录功能将无法使用。请运行: pip install aiofiles")
 
 try:
     import aiosqlite
 except ImportError:
     aiosqlite = None
-    print("⚠️  aiosqlite未安装，SQLite功能将无法使用。请运行: pip install aiosqlite")
+    logger.warning("⚠️  aiosqlite未安装，SQLite功能将无法使用。请运行: pip install aiosqlite")
 
 
 class SpreadHistoryRecorder:
@@ -91,6 +104,10 @@ class SpreadHistoryRecorder:
         self.window_data_maxsize = 100  # 每个代币最多保留100条
         self.last_sample_time = time.time()
         
+        # 🔥 每个代币的最后记录时间（用于去重，1分钟内只记录一次）
+        self._last_record_time: Dict[str, float] = {}
+        self._record_interval_seconds = 60  # 每个代币1分钟内只记录一次
+        
         # 写入队列（异步）
         self.write_queue = asyncio.Queue(maxsize=queue_maxsize)
         
@@ -136,7 +153,12 @@ class SpreadHistoryRecorder:
         self.cleanup_task = asyncio.create_task(self._cleanup_loop())
         
         sqlite_status = "（SQLite已启用）" if self.sqlite_enabled else "（SQLite未启用）"
-        print(f"✅ 历史记录器已启动 {sqlite_status}")
+        logger.info(f"✅ [历史记录] 历史记录器已启动 {sqlite_status}")
+        logger.info(f"📁 [历史记录] 数据目录: {self.data_dir}")
+        logger.info(f"⏱️  [历史记录] 采样间隔: {self.sample_interval_seconds}秒，采样策略: {self.sample_strategy}")
+        logger.info(f"💾 [历史记录] 批量写入配置: batch_size={self.batch_size}, batch_timeout={self.batch_timeout}秒")
+        # 🔥 诊断：确认日志配置
+        logger.info(f"🔍 [历史记录] 日志配置检查: handlers={[type(h).__name__ for h in logger.handlers]}, level={logger.level}")
     
     async def stop(self):
         """停止历史记录器"""
@@ -166,12 +188,14 @@ class SpreadHistoryRecorder:
         # 写入剩余数据
         await self._flush_remaining_data()
         
-        print("🛑 历史记录器已停止")
+        logger.info("🛑 [历史记录] 历史记录器已停止")
     
     async def record_spread(self, data: dict):
         """记录价差（非阻塞，只写入时间窗口缓存）
         
         性能保证：< 0.001ms，不阻塞
+        
+        🔥 去重机制：每个代币在1分钟内只记录一次
         
         Args:
             data: 套利机会数据，包含：
@@ -180,17 +204,31 @@ class SpreadHistoryRecorder:
                 - exchange_sell: 卖出交易所
                 - price_buy: 买入价格
                 - price_sell: 卖出价格
-                - spread_pct: 价差百分比
+                - spread_pct: 价差百分比（主要数据）
+                - funding_rate_buy: 买入交易所资金费率（主要数据）
+                - funding_rate_sell: 卖出交易所资金费率（主要数据）
+                - funding_rate_diff: 资金费率差（主要数据，8小时费率差）
                 - funding_rate_diff_annual: 年化资金费率差（可选）
                 - size_buy: 买入数量（可选）
                 - size_sell: 卖出数量（可选）
         """
         if not self.running:
+            logger.warning(f"⚠️  [历史记录] 历史记录器未运行，跳过记录: {data.get('symbol', 'unknown')}")
             return
         
         symbol = data.get('symbol')
         if not symbol:
             return
+        
+        # 🔥 去重检查：每个代币在1分钟内只记录一次
+        current_time = time.time()
+        last_record_time = self._last_record_time.get(symbol, 0)
+        if current_time - last_record_time < self._record_interval_seconds:
+            # 在1分钟内已记录过，跳过（静默跳过，不记录日志）
+            return
+        
+        # 更新最后记录时间
+        self._last_record_time[symbol] = current_time
         
         # 添加到时间窗口缓存（不阻塞）
         self.window_data[symbol].append({
@@ -203,9 +241,15 @@ class SpreadHistoryRecorder:
             self.window_data[symbol] = self.window_data[symbol][-self.window_data_maxsize:]
         
         self.stats['records_received'] += 1
+        
+        # 🔥 调试日志：每100条记录输出一次统计
+        if self.stats['records_received'] % 100 == 0:
+            total_cached = sum(len(v) for v in self.window_data.values())
+            logger.info(f"📊 [历史记录] 已接收 {self.stats['records_received']} 条记录，内存缓存 {total_cached} 条，等待采样...")
     
     async def _time_window_sampler(self):
         """时间窗口采样器（每1分钟采样一次，非阻塞）"""
+        logger.info(f"🕐 [历史记录] 采样器已启动，采样间隔: {self.sample_interval_seconds}秒")
         while self.running:
             try:
                 await asyncio.sleep(self.sample_interval_seconds)
@@ -213,17 +257,26 @@ class SpreadHistoryRecorder:
                 current_time = time.time()
                 if current_time - self.last_sample_time >= self.sample_interval_seconds:
                     # 采样当前时间窗口的数据（< 0.1ms）
+                    total_cached = sum(len(v) for v in self.window_data.values())
                     sampled_data = self._sample_window_data()
                     
                     if sampled_data:
                         self.stats['samples_taken'] += len(sampled_data)
+                        logger.info(f"📊 [历史记录] 采样完成: 从 {total_cached} 条缓存中采样 {len(sampled_data)} 条数据")
                         
                         # 非阻塞放入写入队列
                         try:
                             self.write_queue.put_nowait(sampled_data)
+                            logger.info(f"✅ [历史记录] 已放入写入队列，队列大小: {self.write_queue.qsize()}")
                         except asyncio.QueueFull:
                             # 队列满时丢弃（不影响核心流程）
                             self.stats['queue_drops'] += 1
+                            logger.warning(f"⚠️  [历史记录] 写入队列已满，丢弃数据")
+                    else:
+                        if total_cached > 0:
+                            logger.warning(f"⚠️  [历史记录] 采样器运行，但采样结果为空（缓存中有 {total_cached} 条数据）")
+                        else:
+                            logger.debug(f"💤 [历史记录] 采样器运行，但缓存为空（未检测到套利机会）")
                     
                     # 清空时间窗口缓存
                     self.window_data.clear()
@@ -233,7 +286,7 @@ class SpreadHistoryRecorder:
                 break
             except Exception as e:
                 # 错误隔离：不影响核心流程
-                print(f"⚠️  历史记录采样错误（已隔离）: {e}")
+                logger.error(f"⚠️  [历史记录] 采样错误（已隔离）: {e}", exc_info=True)
     
     def _sample_window_data(self) -> List[dict]:
         """采样时间窗口数据（< 0.1ms）"""
@@ -246,10 +299,17 @@ class SpreadHistoryRecorder:
             if self.sample_strategy == "max":
                 # 选择价差最大的数据点
                 best = max(data_list, key=lambda x: x.get('spread_pct', 0))
+                # 🔥 确保所有数值字段都转换为Python原生类型（避免Decimal类型）
+                best = self._convert_data_types(best)
                 sampled.append(best)
             elif self.sample_strategy == "mean":
                 # 计算平均值
                 if len(data_list) > 0:
+                    # 🔥 计算资金费率平均值（如果存在）
+                    funding_rate_buy_list = [d.get('funding_rate_buy') for d in data_list if d.get('funding_rate_buy') is not None]
+                    funding_rate_sell_list = [d.get('funding_rate_sell') for d in data_list if d.get('funding_rate_sell') is not None]
+                    funding_rate_diff_list = [d.get('funding_rate_diff') for d in data_list if d.get('funding_rate_diff') is not None]
+                    
                     avg_data = {
                         'symbol': symbol,
                         'timestamp': datetime.now().isoformat(),
@@ -257,17 +317,40 @@ class SpreadHistoryRecorder:
                         'exchange_sell': data_list[0].get('exchange_sell', ''),
                         'price_buy': sum(d.get('price_buy', 0) for d in data_list) / len(data_list),
                         'price_sell': sum(d.get('price_sell', 0) for d in data_list) / len(data_list),
-                        'spread_pct': sum(d.get('spread_pct', 0) for d in data_list) / len(data_list),
+                        'spread_pct': sum(d.get('spread_pct', 0) for d in data_list) / len(data_list),  # 🔥 主要数据：价差百分比
+                        'funding_rate_buy': sum(funding_rate_buy_list) / len(funding_rate_buy_list) if funding_rate_buy_list else None,  # 🔥 主要数据：买入交易所资金费率
+                        'funding_rate_sell': sum(funding_rate_sell_list) / len(funding_rate_sell_list) if funding_rate_sell_list else None,  # 🔥 主要数据：卖出交易所资金费率
+                        'funding_rate_diff': sum(funding_rate_diff_list) / len(funding_rate_diff_list) if funding_rate_diff_list else None,  # 🔥 主要数据：资金费率差（8小时费率差）
                         'funding_rate_diff_annual': sum(d.get('funding_rate_diff_annual', 0) for d in data_list) / len(data_list) if data_list[0].get('funding_rate_diff_annual') is not None else None,
                         'size_buy': sum(d.get('size_buy', 0) for d in data_list) / len(data_list),
                         'size_sell': sum(d.get('size_sell', 0) for d in data_list) / len(data_list),
                     }
+                    # 🔥 确保所有数值字段都转换为Python原生类型（避免Decimal类型）
+                    avg_data = self._convert_data_types(avg_data)
                     sampled.append(avg_data)
             elif self.sample_strategy == "latest":
                 # 选择最新的数据点
-                sampled.append(data_list[-1])
+                latest = data_list[-1]
+                # 🔥 确保所有数值字段都转换为Python原生类型（避免Decimal类型）
+                latest = self._convert_data_types(latest)
+                sampled.append(latest)
         
         return sampled
+    
+    def _convert_data_types(self, data: dict) -> dict:
+        """转换数据中的Decimal类型为float（确保SQLite兼容）"""
+        from decimal import Decimal
+        converted = {}
+        for key, value in data.items():
+            if value is None:
+                converted[key] = None
+            elif isinstance(value, Decimal):
+                converted[key] = float(value)
+            elif isinstance(value, (int, float)):
+                converted[key] = float(value)
+            else:
+                converted[key] = value
+        return converted
     
     async def _init_sqlite_database(self):
         """初始化SQLite数据库和表结构"""
@@ -287,12 +370,31 @@ class SpreadHistoryRecorder:
                         price_buy REAL NOT NULL,
                         price_sell REAL NOT NULL,
                         spread_pct REAL NOT NULL,
+                        funding_rate_buy REAL,
+                        funding_rate_sell REAL,
+                        funding_rate_diff REAL,
                         funding_rate_diff_annual REAL,
                         size_buy REAL NOT NULL,
                         size_sell REAL NOT NULL,
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
+                
+                # 🔥 检查并添加新字段（如果表已存在但字段不存在）
+                try:
+                    await db.execute("ALTER TABLE spread_history_sampled ADD COLUMN funding_rate_buy REAL")
+                except Exception:
+                    pass  # 字段已存在，忽略错误
+                
+                try:
+                    await db.execute("ALTER TABLE spread_history_sampled ADD COLUMN funding_rate_sell REAL")
+                except Exception:
+                    pass  # 字段已存在，忽略错误
+                
+                try:
+                    await db.execute("ALTER TABLE spread_history_sampled ADD COLUMN funding_rate_diff REAL")
+                except Exception:
+                    pass  # 字段已存在，忽略错误
                 
                 # 创建索引（如果不存在）
                 await db.execute("""
@@ -318,7 +420,7 @@ class SpreadHistoryRecorder:
                 await db.commit()
                 
         except Exception as e:
-            print(f"⚠️  SQLite数据库初始化失败（已隔离）: {e}")
+            logger.error(f"⚠️  [历史记录] SQLite数据库初始化失败（已隔离）: {e}", exc_info=True)
             self.sqlite_enabled = False
     
     async def _async_write_loop(self):
@@ -360,12 +462,14 @@ class SpreadHistoryRecorder:
                 break
             except Exception as e:
                 # 错误隔离：不影响核心流程
-                print(f"⚠️  历史记录写入错误（已隔离）: {e}")
+                logger.error(f"⚠️  [历史记录] 写入错误（已隔离）: {e}", exc_info=True)
     
     async def _write_batch(self, batch: List[dict]):
         """批量写入CSV和SQLite（异步IO，不阻塞）"""
         if not batch:
             return
+        
+        logger.info(f"💾 [历史记录] 开始批量写入 {len(batch)} 条数据到CSV和SQLite...")
         
         # 并行写入CSV和SQLite
         tasks = [self._write_batch_to_csv(batch)]
@@ -394,7 +498,7 @@ class SpreadHistoryRecorder:
                 
                 # 如果是新文件，写入表头
                 if not csv_file.exists():
-                    header = "timestamp,symbol,exchange_buy,exchange_sell,price_buy,price_sell,spread_pct,funding_rate_diff_annual,size_buy,size_sell\n"
+                    header = "timestamp,symbol,exchange_buy,exchange_sell,price_buy,price_sell,spread_pct,funding_rate_buy,funding_rate_sell,funding_rate_diff,funding_rate_diff_annual,size_buy,size_sell\n"
                     async with aiofiles.open(csv_file, 'a') as f:
                         await f.write(header)
             
@@ -409,6 +513,9 @@ class SpreadHistoryRecorder:
                     f"{data.get('price_buy', 0):.8f},"
                     f"{data.get('price_sell', 0):.8f},"
                     f"{data.get('spread_pct', 0):.6f},"
+                    f"{data.get('funding_rate_buy', 0) if data.get('funding_rate_buy') is not None else 0:.8f},"
+                    f"{data.get('funding_rate_sell', 0) if data.get('funding_rate_sell') is not None else 0:.8f},"
+                    f"{data.get('funding_rate_diff', 0) if data.get('funding_rate_diff') is not None else 0:.8f},"
                     f"{data.get('funding_rate_diff_annual', 0) if data.get('funding_rate_diff_annual') is not None else 0:.2f},"
                     f"{data.get('size_buy', 0):.8f},"
                     f"{data.get('size_sell', 0):.8f}\n"
@@ -421,34 +528,53 @@ class SpreadHistoryRecorder:
             
         except Exception as e:
             # 错误隔离：不影响核心流程
-            print(f"⚠️  历史记录CSV写入错误（已隔离）: {e}")
+            logger.error(f"⚠️  [历史记录] CSV写入错误（已隔离）: {e}", exc_info=True)
     
     async def _write_batch_to_sqlite(self, batch: List[dict]):
         """批量写入SQLite数据库（异步）"""
         if not batch or not self.sqlite_enabled:
             return
         
+        logger.info(f"💾 [历史记录] 写入SQLite: {len(batch)} 条数据")
+        
         try:
+            # 🔥 转换 decimal.Decimal 为 float（SQLite不支持Decimal类型）
+            def convert_value(v):
+                """转换值类型，确保SQLite兼容"""
+                if v is None:
+                    return None
+                from decimal import Decimal
+                if isinstance(v, Decimal):
+                    return float(v)
+                # 确保所有数值类型都转换为Python原生类型
+                if isinstance(v, (int, float)):
+                    return float(v)
+                return v
+            
             async with aiosqlite.connect(self.db_path) as db:
                 # 使用executemany批量插入，提高性能
                 await db.executemany("""
                     INSERT INTO spread_history_sampled 
                     (timestamp, symbol, exchange_buy, exchange_sell, 
-                     price_buy, price_sell, spread_pct, funding_rate_diff_annual, 
+                     price_buy, price_sell, spread_pct, 
+                     funding_rate_buy, funding_rate_sell, funding_rate_diff, funding_rate_diff_annual, 
                      size_buy, size_sell)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, [
                     (
                         data.get('timestamp', ''),
                         data.get('symbol', ''),
                         data.get('exchange_buy', ''),
                         data.get('exchange_sell', ''),
-                        data.get('price_buy', 0),
-                        data.get('price_sell', 0),
-                        data.get('spread_pct', 0),
-                        data.get('funding_rate_diff_annual') if data.get('funding_rate_diff_annual') is not None else None,
-                        data.get('size_buy', 0),
-                        data.get('size_sell', 0),
+                        convert_value(data.get('price_buy', 0)),
+                        convert_value(data.get('price_sell', 0)),
+                        convert_value(data.get('spread_pct', 0)),  # 🔥 主要数据：价差百分比
+                        convert_value(data.get('funding_rate_buy')) if data.get('funding_rate_buy') is not None else None,  # 🔥 主要数据：买入交易所资金费率
+                        convert_value(data.get('funding_rate_sell')) if data.get('funding_rate_sell') is not None else None,  # 🔥 主要数据：卖出交易所资金费率
+                        convert_value(data.get('funding_rate_diff')) if data.get('funding_rate_diff') is not None else None,  # 🔥 主要数据：资金费率差（8小时费率差）
+                        convert_value(data.get('funding_rate_diff_annual')) if data.get('funding_rate_diff_annual') is not None else None,
+                        convert_value(data.get('size_buy', 0)),
+                        convert_value(data.get('size_sell', 0)),
                     )
                     for data in batch
                 ])
@@ -457,7 +583,7 @@ class SpreadHistoryRecorder:
                 
         except Exception as e:
             # 错误隔离：不影响核心流程
-            print(f"⚠️  历史记录SQLite写入错误（已隔离）: {e}")
+            logger.error(f"⚠️  [历史记录] SQLite写入错误（已隔离）: {e}", exc_info=True)
     
     async def _flush_remaining_data(self):
         """刷新剩余数据"""
@@ -498,7 +624,7 @@ class SpreadHistoryRecorder:
                 break
             except Exception as e:
                 # 错误隔离：不影响核心流程
-                print(f"⚠️  清理任务错误（已隔离）: {e}")
+                logger.error(f"⚠️  [历史记录] 清理任务错误（已隔离）: {e}", exc_info=True)
                 await asyncio.sleep(3600)  # 出错后等待1小时再重试
     
     async def _archive_old_files(self):
@@ -561,13 +687,13 @@ class SpreadHistoryRecorder:
                 continue
             except Exception as e:
                 # 错误隔离：不影响核心流程
-                print(f"⚠️  文件处理错误（已隔离）: {csv_file.name}, {e}")
+                logger.error(f"⚠️  [历史记录] 文件处理错误（已隔离）: {csv_file.name}, {e}", exc_info=True)
                 continue
         
         if compressed_count > 0 or archived_count > 0:
             self.stats['files_compressed'] += compressed_count
             self.stats['files_archived'] += archived_count
-            print(f"📦 清理完成: 压缩 {compressed_count} 个文件，归档 {archived_count} 个文件")
+            logger.info(f"📦 [历史记录] 清理完成: 压缩 {compressed_count} 个文件，归档 {archived_count} 个文件")
     
     @staticmethod
     def _compress_file(source_file: Path, target_file: Path):

@@ -53,6 +53,19 @@ class EdgeXAdapter(ExchangeAdapter):
         self.rest.logger = self.logger
         self.websocket.logger = self.logger
         
+        # 🔥 关键：阻止EdgeX日志输出到终端（与Lighter保持一致）
+        # 移除所有StreamHandler，只保留文件输出
+        if self.logger:
+            self.logger.propagate = False
+            handlers_to_remove = []
+            for handler in self.logger.handlers:
+                from logging import StreamHandler
+                from logging.handlers import RotatingFileHandler
+                if isinstance(handler, StreamHandler) and not isinstance(handler, RotatingFileHandler):
+                    handlers_to_remove.append(handler)
+            for handler in handlers_to_remove:
+                self.logger.removeHandler(handler)
+        
         # 🚀 初始化订阅管理器 - 加载EdgeX配置文件
         try:
             # 尝试加载YAML配置文件
@@ -68,10 +81,10 @@ class EdgeXAdapter(ExchangeAdapter):
             )
             
             if self.logger:
-                self.logger.info(f"✅ EdgeX订阅管理器初始化成功，模式: {config_dict.get('subscription_mode', {}).get('mode', 'unknown')}")
+                self.logger.info(f"✅ [EdgeX] 订阅管理器初始化成功，模式: {config_dict.get('subscription_mode', {}).get('mode', 'unknown')}")
                 
         except Exception as e:
-            self.logger.warning(f"创建EdgeX订阅管理器失败，使用默认配置: {e}")
+            self.logger.warning(f"⚠️ [EdgeX] 创建订阅管理器失败，使用默认配置: {e}")
             # 使用默认配置
             default_config = {
                 'exchange_id': 'edgex',
@@ -168,11 +181,11 @@ class EdgeXAdapter(ExchangeAdapter):
             self.base._contract_mappings = self.websocket._contract_mappings
             self.base._symbol_contract_mappings = self.websocket._symbol_contract_mappings
             
-            self.logger.info("EdgeX连接成功")
+            self.logger.info("✅ [EdgeX] 连接成功")
             return True
 
         except Exception as e:
-            self.logger.warning(f"EdgeX连接失败: {str(e)}")
+            self.logger.warning(f"❌ [EdgeX] 连接失败: {str(e)}")
             return False
 
     async def _do_disconnect(self) -> None:
@@ -187,10 +200,10 @@ class EdgeXAdapter(ExchangeAdapter):
             # 清理订阅管理器
             self._subscription_manager.clear_subscriptions()
             
-            self.logger.info("EdgeX连接已断开")
+            self.logger.info("✅ [EdgeX] 连接已断开")
 
         except Exception as e:
-            self.logger.warning(f"断开EdgeX连接时出错: {e}")
+            self.logger.warning(f"❌ [EdgeX] 断开连接时出错: {e}")
 
     async def _do_authenticate(self) -> bool:
         """执行具体的认证逻辑"""
@@ -582,12 +595,12 @@ class EdgeXAdapter(ExchangeAdapter):
             # 检查是否应该订阅ticker数据
             if not self._subscription_manager.should_subscribe_data_type(DataType.TICKER):
                 if self.logger:
-                    self.logger.info("配置中禁用了ticker数据订阅，跳过")
+                    self.logger.info("[EdgeX] 配置中禁用了ticker数据订阅，跳过")
                 return
             
             if not symbols:
                 if self.logger:
-                    self.logger.warning("没有找到要订阅的交易对")
+                    self.logger.warning("⚠️ [EdgeX] 没有找到要订阅的交易对")
                 return
             
             # 将订阅添加到管理器
@@ -602,11 +615,11 @@ class EdgeXAdapter(ExchangeAdapter):
             await self.websocket.batch_subscribe_tickers(symbols, callback)
             
             if self.logger:
-                self.logger.info(f"✅ EdgeX批量订阅ticker完成: {len(symbols)}个交易对")
+                self.logger.info(f"✅ [EdgeX] 批量订阅ticker完成: {len(symbols)}个交易对")
                 
         except Exception as e:
             if self.logger:
-                self.logger.error(f"EdgeX批量订阅ticker失败: {str(e)}")
+                self.logger.error(f"❌ [EdgeX] 批量订阅ticker失败: {str(e)}")
             raise
 
     async def batch_subscribe_orderbooks(self, symbols: Optional[List[str]] = None, depth: int = 15, callback: Optional[Callable[[str, OrderBookData], None]] = None) -> None:
@@ -635,12 +648,12 @@ class EdgeXAdapter(ExchangeAdapter):
             # 检查是否应该订阅orderbook数据
             if not self._subscription_manager.should_subscribe_data_type(DataType.ORDERBOOK):
                 if self.logger:
-                    self.logger.info("配置中禁用了orderbook数据订阅，跳过")
+                    self.logger.info("[EdgeX] 配置中禁用了orderbook数据订阅，跳过")
                 return
             
             if not symbols:
                 if self.logger:
-                    self.logger.warning("没有找到要订阅的交易对")
+                    self.logger.warning("⚠️ [EdgeX] 没有找到要订阅的交易对")
                 return
             
             # 将订阅添加到管理器
@@ -655,11 +668,11 @@ class EdgeXAdapter(ExchangeAdapter):
             await self.websocket.batch_subscribe_orderbooks(symbols, depth, callback)
             
             if self.logger:
-                self.logger.info(f"✅ EdgeX批量订阅orderbook完成: {len(symbols)}个交易对")
+                self.logger.info(f"✅ [EdgeX] 批量订阅orderbook完成: {len(symbols)}个交易对")
                 
         except Exception as e:
             if self.logger:
-                self.logger.error(f"EdgeX批量订阅orderbook失败: {str(e)}")
+                self.logger.error(f"❌ [EdgeX] 批量订阅orderbook失败: {str(e)}")
             raise
 
     async def batch_subscribe_mixed(self, 
@@ -693,7 +706,7 @@ class EdgeXAdapter(ExchangeAdapter):
             
             if not symbols:
                 if self.logger:
-                    self.logger.warning("没有找到要订阅的交易对")
+                    self.logger.warning("⚠️ [EdgeX] 没有找到要订阅的交易对")
                 return
             
             # 根据配置决定订阅哪些数据类型
@@ -705,7 +718,7 @@ class EdgeXAdapter(ExchangeAdapter):
                 await self.batch_subscribe_tickers(symbols, ticker_callback)
                 subscription_count += 1
                 if self.logger:
-                    self.logger.info(f"✅ 已订阅ticker数据: {len(symbols)}个交易对")
+                    self.logger.info(f"✅ [EdgeX] 已订阅ticker数据: {len(symbols)}个交易对")
             
             # 订阅orderbook数据
             if (orderbook_callback is not None and 
@@ -713,7 +726,7 @@ class EdgeXAdapter(ExchangeAdapter):
                 await self.batch_subscribe_orderbooks(symbols, depth, orderbook_callback)
                 subscription_count += 1
                 if self.logger:
-                    self.logger.info(f"✅ 已订阅orderbook数据: {len(symbols)}个交易对")
+                    self.logger.info(f"✅ [EdgeX] 已订阅orderbook数据: {len(symbols)}个交易对")
             
             # 订阅trades数据
             if (trades_callback is not None and 
@@ -722,7 +735,7 @@ class EdgeXAdapter(ExchangeAdapter):
                     await self.subscribe_trades(symbol, trades_callback)
                 subscription_count += 1
                 if self.logger:
-                    self.logger.info(f"✅ 已订阅trades数据: {len(symbols)}个交易对")
+                    self.logger.info(f"✅ [EdgeX] 已订阅trades数据: {len(symbols)}个交易对")
             
             # 订阅user_data数据
             if (user_data_callback is not None and 
@@ -730,17 +743,17 @@ class EdgeXAdapter(ExchangeAdapter):
                 await self.subscribe_user_data(user_data_callback)
                 subscription_count += 1
                 if self.logger:
-                    self.logger.info(f"✅ 已订阅user_data数据")
+                    self.logger.info(f"✅ [EdgeX] 已订阅user_data数据")
             
             # 获取订阅统计信息
             stats = self._subscription_manager.get_subscription_stats()
             if self.logger:
-                self.logger.info(f"🎯 EdgeX混合订阅完成: {subscription_count}种数据类型, {len(symbols)}个交易对")
-                self.logger.info(f"📊 订阅统计: {stats}")
+                self.logger.info(f"🎯 [EdgeX] 混合订阅完成: {subscription_count}种数据类型, {len(symbols)}个交易对")
+                self.logger.info(f"📊 [EdgeX] 订阅统计: {stats}")
             
         except Exception as e:
             if self.logger:
-                self.logger.error(f"EdgeX批量混合订阅失败: {e}")
+                self.logger.error(f"❌ [EdgeX] 批量混合订阅失败: {e}")
             raise
 
     def get_subscription_manager(self) -> SubscriptionManager:
@@ -875,7 +888,7 @@ class EdgeXAdapter(ExchangeAdapter):
     async def batch_subscribe_all_tickers(self, callback: Optional[Callable[[str, TickerData], None]] = None) -> None:
         """订阅所有交易对的ticker数据（使用ticker.all频道）"""
         try:
-            self.logger.info("开始订阅所有交易对的ticker数据")
+            self.logger.info("[EdgeX] 开始订阅所有交易对的ticker数据")
             
             # 建立WebSocket连接
             if not self.websocket._ws_connection:

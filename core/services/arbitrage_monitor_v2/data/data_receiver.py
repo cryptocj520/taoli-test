@@ -113,7 +113,7 @@ class DataReceiver:
                 # 如果新交易所的回调格式与标准格式不同，在这里添加特殊处理
                 # ============================================================
                 
-                # 🚀 Lighter特殊处理：使用统一回调模式（完全复制V1逻辑）
+                # 🚀 Lighter特殊处理：使用批量订阅模式（参考EdgeX的实现）
                 if exchange == "lighter":
                     # 🔥 固定 exchange 值，避免闭包变量捕获问题
                     exchange_name = "lighter"
@@ -166,29 +166,24 @@ class DataReceiver:
                             if self.debug.is_debug_enabled():
                                 print(f"⚠️  [lighter] ticker回调失败: {e}")
                     
-                    # 逐个订阅（首次注册回调，后续传None）
-                    for idx, standard_symbol in enumerate(symbols):
+                    # 🔥 转换所有符号为Lighter格式
+                    exchange_symbols = []
+                    for standard_symbol in symbols:
                         try:
                             exchange_symbol = self.symbol_converter.convert_to_exchange(standard_symbol, exchange)
+                            exchange_symbols.append(exchange_symbol)
                             print(f"🔍 [Lighter] 准备订阅: {standard_symbol} -> {exchange_symbol}")
-                            
-                            # 订单簿订阅
-                            if idx == 0:
-                                print(f"🔍 [Lighter] 注册订单簿回调并订阅: {exchange_symbol}")
-                                await adapter.subscribe_orderbook(exchange_symbol, lighter_orderbook_callback)
-                                print(f"✅ [Lighter] 订单簿订阅完成: {exchange_symbol}")
-                            else:
-                                await adapter.subscribe_orderbook(exchange_symbol, None)
-                            
-                            # Ticker订阅
-                            if idx == 0:
-                                await adapter.subscribe_ticker(exchange_symbol, lighter_ticker_callback)
-                            else:
-                                await adapter.subscribe_ticker(exchange_symbol, None)
                         except Exception as e:
-                            print(f"❌ [lighter] {standard_symbol} 订阅失败: {e}")
-                            import traceback
-                            traceback.print_exc()
+                            print(f"⚠️  [Lighter] {standard_symbol} 符号转换失败: {e}")
+                    
+                    # 🔥 使用批量订阅方法（设置统一回调，所有符号共享）
+                    if exchange_symbols:
+                        print(f"📡 [Lighter] 批量订阅 {len(exchange_symbols)} 个交易对的订单簿和Ticker...")
+                        await adapter.batch_subscribe_orderbooks(exchange_symbols, callback=lighter_orderbook_callback)
+                        await adapter.batch_subscribe_tickers(exchange_symbols, callback=lighter_ticker_callback)
+                        print(f"✅ [Lighter] 批量订阅完成")
+                    else:
+                        print(f"⚠️  [Lighter] 没有可订阅的交易对")
                 
                 elif exchange == "edgex":
                     # 🚀 EdgeX特殊处理：使用批量订阅模式（设置全局回调）

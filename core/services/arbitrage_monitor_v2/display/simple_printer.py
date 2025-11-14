@@ -291,14 +291,14 @@ class SimplePrinter:
                     
                     funding_rate_diff_str = "-"
                     if edgex_fr is not None and lighter_fr is not None:
-                        # 两个费率都是8小时费率，直接相减
-                        rate_diff = edgex_fr - lighter_fr
+                        # 🔥 资金费率差应该永远为正数（绝对值差值）
+                        rate_diff = abs(edgex_fr - lighter_fr)
                         # 8小时差值（百分比）
                         diff_8h = float(rate_diff * 100)
                         # 年化差值：8小时差值 × 1095
                         diff_annual = diff_8h * 1095
-                        sign = "+" if rate_diff >= 0 else ""
-                        funding_rate_diff_str = f"{sign}{diff_8h:.4f}%/{sign}{diff_annual:.1f}%"
+                        # 费率差永远是正数，不需要符号
+                        funding_rate_diff_str = f"{diff_8h:.4f}%/{diff_annual:.1f}%"
                     
                     # 🔥 格式化资金费率显示
                     edgex_fr_str = "-"
@@ -514,14 +514,14 @@ class SimplePrinter:
         funding_rate_diff_str = ""
         if funding_rate_diff is not None:
             # funding_rate_diff 是8小时费率差（小数形式，如0.0001表示0.01%）
-            rate_diff = funding_rate_diff
+            # 🔥 资金费率差应该永远为正数（绝对值差值）
+            rate_diff = abs(funding_rate_diff)  # 确保是正数
             # 8小时差值（百分比）
             diff_8h = float(rate_diff * 100)
             # 年化差值：8小时差值 × 1095
             diff_annual = diff_8h * 1095
-            # 显示时保留符号
-            sign = "+" if rate_diff >= 0 else ""
-            funding_rate_diff_str = f"   费率差(年化): {sign}{diff_annual:.1f}%\n"
+            # 费率差永远是正数，不需要符号
+            funding_rate_diff_str = f"   费率差(年化): {diff_annual:.1f}%\n"
         
         # 📢 打印套利机会（高亮）
         print()
